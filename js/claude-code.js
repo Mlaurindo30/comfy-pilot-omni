@@ -18,6 +18,8 @@ function createWindowSessionId() {
 
 let floatingWindow = null;
 let actionbarReopenButton = null;
+let actionbarObserver = null;
+let actionbarRefreshQueued = false;
 const workspace = {
     adapters: [],
     settings: {
@@ -264,10 +266,6 @@ function createFloatingWindow() {
             <div class="pilot-title-area">
                 <span class="pilot-title">Comfy Pilot</span>
                 <span class="pilot-active-cli">Loading...</span>
-                <div class="pilot-mcp-status" title="MCP status">
-                    <span class="mcp-indicator"></span>
-                    <span class="mcp-label">MCP</span>
-                </div>
             </div>
             <div class="pilot-controls">
                 <button class="pilot-btn pilot-reload" title="Reload active terminal">↻</button>
@@ -314,10 +312,6 @@ function createFloatingWindow() {
                     fitAllTerminals();
                 }, 50);
             }
-        });
-
-        container.querySelector(".pilot-mcp-status").addEventListener("click", () => {
-            void checkMcpStatus();
         });
     }, 0);
 
@@ -380,54 +374,6 @@ function ensureStyles() {
         .pilot-active-cli {
             font-size: 12px;
             color: #93c5fd;
-        }
-
-        .pilot-mcp-status {
-            display: flex;
-            align-items: center;
-            gap: 5px;
-            padding: 3px 8px;
-            border-radius: 4px;
-            background: rgba(255, 255, 255, 0.05);
-            cursor: pointer;
-            transition: background 0.15s;
-        }
-
-        .pilot-mcp-status:hover {
-            background: rgba(255, 255, 255, 0.1);
-        }
-
-        .mcp-indicator {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: #666;
-            transition: background 0.3s;
-        }
-
-        .mcp-indicator.connected {
-            background: #4ade80;
-            box-shadow: 0 0 6px rgba(74, 222, 128, 0.5);
-        }
-
-        .mcp-indicator.disconnected {
-            background: #f87171;
-        }
-
-        .mcp-indicator.checking {
-            background: #fbbf24;
-            animation: pilot-pulse 1s infinite;
-        }
-
-        @keyframes pilot-pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
-        }
-
-        .mcp-label {
-            font-size: 11px;
-            color: #888;
-            font-weight: 500;
         }
 
         .pilot-controls {
@@ -494,7 +440,6 @@ function ensureStyles() {
             padding: 8px 10px;
         }
 
-        #comfy-pilot-window.minimized .mcp-label,
         #comfy-pilot-window.minimized .pilot-active-cli {
             display: none;
         }
@@ -788,6 +733,39 @@ function ensureActionbarReopenButton() {
     return actionbarReopenButton;
 }
 
+function queueActionbarButtonRefresh() {
+    if (actionbarRefreshQueued) {
+        return;
+    }
+    actionbarRefreshQueued = true;
+    requestAnimationFrame(() => {
+        actionbarRefreshQueued = false;
+        updateActionbarButtonVisibility();
+    });
+}
+
+function observeActionbarContainer() {
+    if (actionbarObserver || !document.body) {
+        return;
+    }
+
+    actionbarObserver = new MutationObserver(() => {
+        const container = document.querySelector(".actionbar-container");
+        if (!container) {
+            return;
+        }
+        if (actionbarReopenButton?.parentElement === container) {
+            return;
+        }
+        queueActionbarButtonRefresh();
+    });
+
+    actionbarObserver.observe(document.body, {
+        childList: true,
+        subtree: true,
+    });
+}
+
 function updateActionbarButtonVisibility() {
     const button = ensureActionbarReopenButton();
     if (!button) {
@@ -797,19 +775,8 @@ function updateActionbarButtonVisibility() {
 }
 
 function addActionbarReopenButton() {
-    if (ensureActionbarReopenButton()) {
-        updateActionbarButtonVisibility();
-        return;
-    }
-
-    const checkActionbar = setInterval(() => {
-        if (ensureActionbarReopenButton()) {
-            updateActionbarButtonVisibility();
-            clearInterval(checkActionbar);
-        }
-    }, 500);
-
-    setTimeout(() => clearInterval(checkActionbar), 10000);
+    observeActionbarContainer();
+    updateActionbarButtonVisibility();
 }
 
 function getVisibleAdapters() {
@@ -889,7 +856,6 @@ function renderWorkspace() {
         `;
         workspace.activeAdapterId = null;
         updateActiveCliLabel();
-        void checkMcpStatus();
         return;
     }
 
@@ -1086,7 +1052,6 @@ function selectAdapterTab(adapterId) {
             activeState.terminal.focus();
         }, 50);
     }
-    void checkMcpStatus();
 }
 
 function createTerminalOptions() {
@@ -1592,38 +1557,6 @@ window.addEventListener("pagehide", () => {
 window.addEventListener("beforeunload", () => {
     shutdownTerminalWorkspace({ disposeTerminals: true, resetSession: true });
 });
-
-async function checkMcpStatus() {
-    if (!floatingWindow || !workspace.activeAdapterId) {
-        return;
-    }
-
-    const indicator = floatingWindow.querySelector(".mcp-indicator");
-    const label = floatingWindow.querySelector(".mcp-label");
-    if (!indicator || !label) {
-        return;
-    }
-
-    indicator.className = "mcp-indicator checking";
-    label.textContent = "MCP...";
-
-    try {
-        const response = await fetchJson(`${API_BASE}/mcp-status?adapter=${encodeURIComponent(workspace.activeAdapterId)}`);
-        if (response.ready) {
-            indicator.className = "mcp-indicator connected";
-            label.textContent = "MCP";
-            indicator.parentElement.title = `${response.label} MCP ready`;
-        } else {
-            indicator.className = "mcp-indicator disconnected";
-            label.textContent = "MCP";
-            indicator.parentElement.title = `${response.label}: ${response.error || "MCP not ready"}`;
-        }
-    } catch (error) {
-        indicator.className = "mcp-indicator disconnected";
-        label.textContent = "MCP";
-        indicator.parentElement.title = "MCP status unknown";
-    }
-}
 
 function startWorkflowSync() {
     syncWorkflow();

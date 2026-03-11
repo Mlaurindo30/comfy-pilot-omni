@@ -15,7 +15,6 @@ try:
         DEFAULT_ADAPTER_ID,
         ensure_adapter_mcp_config,
         get_adapter,
-        get_adapter_mcp_status,
         get_terminal_backend_status,
         install_claude_code,
         list_adapters,
@@ -27,7 +26,6 @@ except ImportError:  # pragma: no cover - fallback for direct execution
         DEFAULT_ADAPTER_ID,
         ensure_adapter_mcp_config,
         get_adapter,
-        get_adapter_mcp_status,
         get_terminal_backend_status,
         install_claude_code,
         list_adapters,
@@ -530,15 +528,6 @@ async def settings_handler(request):
     return web.json_response(saved)
 
 
-async def mcp_status_handler(request):
-    """Check adapter-specific MCP configuration and shared backend availability."""
-    adapter = get_requested_adapter(request)
-    status = get_adapter_mcp_status(adapter, plugin_dir(), sys.executable)
-    status["platform"] = "windows" if IS_WINDOWS else "unix"
-    status["default_cli"] = load_settings().get("default_cli", DEFAULT_ADAPTER_ID)
-    return web.json_response(status)
-
-
 async def platform_info_handler(request):
     """Return platform information."""
     terminal_backend = get_terminal_backend_status()
@@ -804,8 +793,6 @@ def setup_routes(app):
         ("POST", f"{ROUTE_BASE}/graph-command", graph_command_handler),
         ("GET", f"{LEGACY_ROUTE_BASE}/graph-command", graph_command_handler),
         ("POST", f"{LEGACY_ROUTE_BASE}/graph-command", graph_command_handler),
-        ("GET", f"{ROUTE_BASE}/mcp-status", mcp_status_handler),
-        ("GET", f"{LEGACY_ROUTE_BASE}/mcp-status", mcp_status_handler),
         ("GET", f"{ROUTE_BASE}/memory", memory_stats_handler),
         ("GET", f"{LEGACY_ROUTE_BASE}/memory", memory_stats_handler),
         ("GET", f"{ROUTE_BASE}/platform", platform_info_handler),
