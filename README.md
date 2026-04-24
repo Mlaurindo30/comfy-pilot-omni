@@ -1,16 +1,15 @@
-# Comfy Pilot
+# ComfyUI Pilot Extended
 
-[![Stars](https://img.shields.io/github/stars/ConstantineB6/Comfy-Pilot)](https://github.com/ConstantineB6/Comfy-Pilot/stargazers)
+[![Stars](https://img.shields.io/github/stars/rafek1241/comfyui-pilot-extended)](https://github.com/rafek1241/comfyui-pilot-extended/stargazers)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![ComfyUI Registry](https://img.shields.io/badge/ComfyUI-Registry-blue)](https://registry.comfy.org/publishers/constantine/nodes/comfy-pilot)
 
-Talk to your ComfyUI workflows. Comfy Pilot gives supported coding CLIs direct access to see, edit, and run your workflows - with embedded terminal tabs right inside ComfyUI.
+Talk to your ComfyUI workflows. ComfyUI Pilot Extended gives supported coding CLIs direct access to see, edit, and run your workflows - with embedded terminal tabs right inside ComfyUI.
 
 ![Comfy Pilot](thumbnail.jpg)
 
 ## Why?
 
-Building ComfyUI workflows means manually searching for nodes, dragging connections, and tweaking values one at a time. With Comfy Pilot, you just describe what you want:
+Building ComfyUI workflows means manually searching for nodes, dragging connections, and tweaking values one at a time. With ComfyUI Pilot Extended, you just describe what you want:
 
 - *"Build me an SDXL workflow with ControlNet"* — Claude creates all the nodes, connects them, and sets the parameters
 - *"Look at the output and increase the detail"* — Claude sees your generated image and adjusts the workflow
@@ -22,19 +21,19 @@ No copy-pasting node names. No hunting through menus. Just say what you want.
 
 **CLI (Recommended):**
 ```bash
-comfy node install comfy-pilot
+comfy node install comfyui-pilot-extended
 ```
 
 **ComfyUI Manager:**
 1. Open ComfyUI
 2. Click **Manager** → **Install Custom Nodes**
-3. Search for "Comfy Pilot"
+3. Search for "ComfyUI Pilot Extended"
 4. Click **Install**
 5. Restart ComfyUI
 
 **Git Clone:**
 ```bash
-cd ~/Documents/ComfyUI/custom_nodes && git clone https://github.com/ConstantineB6/comfy-pilot.git
+cd ~/Documents/ComfyUI/custom_nodes && git clone https://github.com/rafek1241/comfyui-pilot-extended.git
 ```
 
 Claude Code can still be auto-installed when selected as the default CLI. Other supported CLIs can be enabled when they are installed on your system.
@@ -167,7 +166,7 @@ Claude will use `download_model` to download from Hugging Face to your ComfyUI m
 
 ### Supported CLIs
 
-Comfy Pilot currently includes built-in adapters for:
+ComfyUI Pilot Extended currently includes built-in adapters for:
 
 - Claude Code
 - GitHub Copilot CLI
@@ -211,7 +210,7 @@ The plugin uses provider-neutral `/comfy-pilot/*` endpoints and can auto-configu
   "mcpServers": {
     "comfyui": {
       "command": "python3",
-      "args": ["/path/to/comfy-pilot/mcp_server.py"]
+      "args": ["/path/to/comfyui-pilot-extended/mcp_server.py"]
     }
   }
 }
