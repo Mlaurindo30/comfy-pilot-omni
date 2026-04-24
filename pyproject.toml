@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-pilot-extended"
 description = "MCP server + multi-CLI embedded terminals that let AI coding agents see and edit your ComfyUI workflows"
-version = "1.0.26"
+version = "1.0.27"
 license = { file = "LICENSE" }
 dependencies = [
 	"pywinpty>=2.0.15; sys_platform == 'win32'",
