@@ -34,7 +34,7 @@ const workspace = {
 };
 
 app.registerExtension({
-    name: "comfy.comfy-pilot",
+    name: "comfy.comfyui-pilot-extended",
     settings: [
         {
             id: DEFAULT_CLI_SETTING_ID,
