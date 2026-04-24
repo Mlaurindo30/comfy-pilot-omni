@@ -1,7 +1,9 @@
 # ComfyUI Pilot Extended
 
-[![Stars](https://img.shields.io/github/stars/rafek1241/comfyui-pilot-extended)](https://github.com/rafek1241/comfyui-pilot-extended/stargazers)
+[![Stars](https://img.shields.io/github/stars/rafek1241/comfy-pilot)](https://github.com/rafek1241/comfy-pilot/stargazers)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+> **Fork of [Comfy Pilot](https://github.com/ConstantineB6/comfy-pilot) by [@ConstantineB6](https://github.com/ConstantineB6).** Maintained here as the upstream repository is no longer active.
 
 Talk to your ComfyUI workflows. ComfyUI Pilot Extended gives supported coding CLIs direct access to see, edit, and run your workflows - with embedded terminal tabs right inside ComfyUI.
 
@@ -33,7 +35,7 @@ comfy node install comfyui-pilot-extended
 
 **Git Clone:**
 ```bash
-cd ~/Documents/ComfyUI/custom_nodes && git clone https://github.com/rafek1241/comfyui-pilot-extended.git
+cd ~/Documents/ComfyUI/custom_nodes && git clone https://github.com/rafek1241/comfy-pilot.git
 ```
 
 Claude Code can still be auto-installed when selected as the default CLI. Other supported CLIs can be enabled when they are installed on your system.

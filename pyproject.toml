@@ -11,12 +11,12 @@ dependencies = [
 dev = ["pytest"]
 
 [project.urls]
-Repository = "https://github.com/rafek1241/comfyui-pilot-extended"
+Repository = "https://github.com/rafek1241/comfy-pilot"
 
 [tool.comfy]
 PublisherId = "rafek1241"
 DisplayName = "ComfyUI Pilot Extended"
-Icon = "https://raw.githubusercontent.com/rafek1241/comfyui-pilot-extended/main/thumbnail.jpg"
+Icon = "https://raw.githubusercontent.com/rafek1241/comfy-pilot/main/thumbnail.jpg"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -6,6 +6,8 @@ on:
       - main
     paths:
       - "pyproject.toml"
+  release:
+    types: [published]
 
 jobs:
   publish-node:
@@ -14,6 +16,21 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update version from release tag
+        if: github.event_name == 'release'
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
+          sed -i "s/^version = .*/version = \"$VERSION\"/" pyproject.toml
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pyproject.toml
+          git commit -m "chore: bump version to $VERSION for release"
+          git push origin HEAD:main
+
       - name: Publish Custom Node
         uses: Comfy-Org/publish-node-action@main
         with:
