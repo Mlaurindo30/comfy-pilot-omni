@@ -30,7 +30,7 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import base64
-from typing import Any
+from typing import Any, Iterator
 
 # ComfyUI API endpoint
 def get_comfyui_url() -> str:
@@ -78,6 +78,7 @@ PLUGIN_ENDPOINTS = {
 _object_info_cache = None
 _object_info_cache_time = 0
 CACHE_TTL = 300  # 5 minutes
+ROOT_GRAPH_ALIASES = {"", "root", "__root__"}
 
 
 def get_object_info_cached() -> dict:
@@ -512,6 +513,138 @@ def run(action: str = "queue", node_ids = None) -> dict:
     return {"error": f"Unknown action: {action}. Use 'queue' or 'interrupt'."}
 
 
+def _normalize_graph_id(graph_id: Any) -> str | None:
+    """Normalize root graph aliases to None and stringify nested graph IDs."""
+    if graph_id is None:
+        return None
+
+    graph_id_str = str(graph_id).strip()
+    if not graph_id_str or graph_id_str.lower() in ROOT_GRAPH_ALIASES:
+        return None
+
+    return graph_id_str
+
+
+def _get_operation_graph_id(op: dict) -> str | None:
+    """Read graph_id from an operation using snake_case or camelCase."""
+    return _normalize_graph_id(op.get("graph_id", op.get("graphId")))
+
+
+def _format_node_locator(node_id: Any, graph_id: Any = None) -> str:
+    """Format a node reference using ComfyUI's graph locator shape."""
+    normalized_graph_id = _normalize_graph_id(graph_id)
+    node_id_str = str(node_id)
+    return f"{normalized_graph_id}:{node_id_str}" if normalized_graph_id else node_id_str
+
+
+def _split_node_locator(node_ref: Any) -> tuple[str | None, str] | None:
+    """Parse '<graph_id>:<node_id>' locators while ignoring execution IDs like '1:2:3'."""
+    if not isinstance(node_ref, str):
+        return None
+
+    parts = node_ref.rsplit(":", 1)
+    if len(parts) != 2:
+        return None
+
+    graph_id_raw, node_id_raw = parts[0].strip(), parts[1].strip()
+    if not graph_id_raw or not node_id_raw.lstrip("-").isdigit():
+        return None
+
+    normalized_graph_id = _normalize_graph_id(graph_id_raw)
+    if normalized_graph_id is None:
+        if graph_id_raw.lower() not in ROOT_GRAPH_ALIASES:
+            return None
+    elif ":" in normalized_graph_id:
+        return None
+
+    return normalized_graph_id, str(int(node_id_raw))
+
+
+def _resolve_node_reference(
+    node_ref: Any,
+    *,
+    created_nodes: dict[str, str] | None = None,
+    default_graph_id: Any = None,
+    field_name: str = "node_id",
+) -> tuple[str | None, str]:
+    """Resolve refs, locators, and plain node IDs into (graph_id, local_node_id)."""
+    created_nodes = created_nodes or {}
+
+    if isinstance(node_ref, str) and node_ref in created_nodes:
+        node_ref = created_nodes[node_ref]
+
+    if isinstance(node_ref, dict):
+        default_graph_id = node_ref.get("graph_id", node_ref.get("graphId", default_graph_id))
+        node_ref = node_ref.get("node_id", node_ref.get("nodeId"))
+
+    locator = _split_node_locator(node_ref)
+    if locator:
+        graph_id, node_id = locator
+    else:
+        if node_ref is None or node_ref == "":
+            raise ValueError(f"{field_name} is required")
+        graph_id = _normalize_graph_id(default_graph_id)
+        node_id = str(node_ref).strip()
+        if not node_id or not node_id.lstrip("-").isdigit():
+            raise ValueError(f"invalid {field_name} '{node_ref}'")
+        node_id = str(int(node_id))
+
+    expected_graph_id = _normalize_graph_id(default_graph_id)
+    if expected_graph_id != graph_id and expected_graph_id is not None:
+        raise ValueError(f"{field_name} graph_id does not match operation graph_id")
+
+    return graph_id, node_id
+
+
+def _iter_workflow_nodes(workflow: dict) -> Iterator[tuple[str | None, dict]]:
+    """Yield (graph_id, node) for root and nested subgraph nodes."""
+    definitions = workflow.get("definitions", {}) if isinstance(workflow, dict) else {}
+    subgraphs = {
+        str(subgraph.get("id")): subgraph
+        for subgraph in definitions.get("subgraphs", [])
+        if subgraph.get("id")
+    }
+
+    def walk(graph_data: dict, current_graph_id: str | None) -> Iterator[tuple[str | None, dict]]:
+        for node in graph_data.get("nodes", []):
+            yield current_graph_id, node
+            nested_graph = subgraphs.get(str(node.get("type")))
+            if nested_graph:
+                yield from walk(nested_graph, _normalize_graph_id(nested_graph.get("id")))
+
+    yield from walk(workflow, None)
+
+
+def _find_workflow_node(workflow: dict, node_ref: Any) -> tuple[str | None, dict] | None:
+    """Find a node in serialized workflow data using a plain ID or locator."""
+    graph_id, node_id = _resolve_node_reference(node_ref, field_name="node_id")
+    node_id_int = int(node_id)
+
+    for current_graph_id, node in _iter_workflow_nodes(workflow):
+        if current_graph_id == graph_id and node.get("id") == node_id_int:
+            return current_graph_id, node
+
+    return None
+
+
+def _extract_pos_size(node: dict) -> tuple[int, int, int, int]:
+    """Return rounded (x, y, width, height) for serialized node data."""
+    pos = node.get("pos", [0, 0])
+    size = node.get("size", [200, 100])
+
+    if isinstance(pos, dict):
+        x, y = pos.get("0", 0), pos.get("1", 0)
+    else:
+        x, y = pos[0] if len(pos) > 0 else 0, pos[1] if len(pos) > 1 else 0
+
+    if isinstance(size, dict):
+        w, h = size.get("0", 200), size.get("1", 100)
+    else:
+        w, h = size[0] if len(size) > 0 else 200, size[1] if len(size) > 1 else 100
+
+    return round(x), round(y), round(w), round(h)
+
+
 def edit_graph(operations) -> str:
     """Edit the workflow graph with one or more operations.
 
@@ -527,6 +660,10 @@ def edit_graph(operations) -> str:
         - set: {action: "set", node_id, property, value} or {action: "set", node_id, properties: {k: v, ...}}
         - connect: {action: "connect", from_node, from_slot, to_node, to_slot}
         - disconnect: {action: "disconnect", from_node, from_slot, to_node, to_slot}
+
+    Supports nested subgraphs via either:
+        - graph_id on the operation (for create and plain local node IDs)
+        - locator IDs like "<subgraph_uuid>:44" for existing nodes
 
     Returns node_id for create operations so subsequent operations can reference it.
     """
@@ -562,11 +699,13 @@ def edit_graph(operations) -> str:
                     result["error"] = f"Unknown node type: {node_type}"
                 else:
                     place_in_view = op.get("place_in_view", False)
+                    graph_id = _get_operation_graph_id(op)
                     r = send_graph_command("create_node", {
                         "type": node_type,
                         "pos_x": op.get("pos_x", 100),
                         "pos_y": op.get("pos_y", 100),
                         "title": op.get("title"),
+                        "graph_id": graph_id,
                         "place_in_view": place_in_view,
                         "viewport_offset": viewport_offset if place_in_view else 0
                     })
@@ -575,7 +714,7 @@ def edit_graph(operations) -> str:
                     if "node_id" in r:
                         ref = op.get("ref")
                         if ref:
-                            created_nodes[ref] = r["node_id"]
+                            created_nodes[ref] = _format_node_locator(r["node_id"], r.get("graph_id", graph_id))
                         # Increment viewport offset for next place_in_view node
                         if place_in_view:
                             # Use node size + gap for offset (default 300 + 30 if size unknown)
@@ -586,7 +725,15 @@ def edit_graph(operations) -> str:
                 node_ids = op.get("node_ids") or [op.get("node_id")]
                 for node_id in node_ids:
                     if node_id:
-                        r = send_graph_command("delete_node", {"node_id": str(node_id)})
+                        graph_id, local_node_id = _resolve_node_reference(
+                            node_id,
+                            created_nodes=created_nodes,
+                            default_graph_id=_get_operation_graph_id(op),
+                        )
+                        r = send_graph_command("delete_node", {
+                            "graph_id": graph_id,
+                            "node_id": local_node_id,
+                        })
                         result.update(r)
 
             elif action == "move":
@@ -594,18 +741,30 @@ def edit_graph(operations) -> str:
                 if not node_id:
                     result["error"] = "node_id is required"
                 else:
-                    # Resolve reference if needed
-                    if node_id in created_nodes:
-                        node_id = created_nodes[node_id]
+                    graph_id, local_node_id = _resolve_node_reference(
+                        node_id,
+                        created_nodes=created_nodes,
+                        default_graph_id=_get_operation_graph_id(op),
+                    )
                     relative_to = op.get("relative_to")
-                    if relative_to and relative_to in created_nodes:
-                        relative_to = created_nodes[relative_to]
+                    relative_graph_id = None
+                    relative_node_id = None
+                    if relative_to:
+                        relative_graph_id, relative_node_id = _resolve_node_reference(
+                            relative_to,
+                            created_nodes=created_nodes,
+                            default_graph_id=graph_id,
+                            field_name="relative_to",
+                        )
+                        if relative_graph_id != graph_id:
+                            raise ValueError("relative_to must be in the same graph as node_id")
 
                     r = send_graph_command("move_node", {
-                        "node_id": str(node_id),
+                        "graph_id": graph_id,
+                        "node_id": local_node_id,
                         "x": op.get("x"),
                         "y": op.get("y"),
-                        "relative_to": str(relative_to) if relative_to else None,
+                        "relative_to": relative_node_id,
                         "direction": op.get("direction"),
                         "gap": op.get("gap", 30),
                         "width": op.get("width"),
@@ -618,10 +777,14 @@ def edit_graph(operations) -> str:
                 if not node_id:
                     result["error"] = "node_id is required"
                 else:
-                    if node_id in created_nodes:
-                        node_id = created_nodes[node_id]
+                    graph_id, local_node_id = _resolve_node_reference(
+                        node_id,
+                        created_nodes=created_nodes,
+                        default_graph_id=_get_operation_graph_id(op),
+                    )
                     r = send_graph_command("move_node", {
-                        "node_id": str(node_id),
+                        "graph_id": graph_id,
+                        "node_id": local_node_id,
                         "width": op.get("width"),
                         "height": op.get("height")
                     })
@@ -632,8 +795,11 @@ def edit_graph(operations) -> str:
                 if not node_id:
                     result["error"] = "node_id is required"
                 else:
-                    if node_id in created_nodes:
-                        node_id = created_nodes[node_id]
+                    graph_id, local_node_id = _resolve_node_reference(
+                        node_id,
+                        created_nodes=created_nodes,
+                        default_graph_id=_get_operation_graph_id(op),
+                    )
 
                     # Support both single property and multiple properties
                     properties = op.get("properties", {})
@@ -642,7 +808,8 @@ def edit_graph(operations) -> str:
 
                     for prop_name, value in properties.items():
                         r = send_graph_command("set_node_property", {
-                            "node_id": str(node_id),
+                            "graph_id": graph_id,
+                            "node_id": local_node_id,
                             "property_name": prop_name,
                             "value": value
                         })
@@ -654,15 +821,27 @@ def edit_graph(operations) -> str:
                 if not from_node or not to_node:
                     result["error"] = "from_node and to_node are required"
                 else:
-                    if from_node in created_nodes:
-                        from_node = created_nodes[from_node]
-                    if to_node in created_nodes:
-                        to_node = created_nodes[to_node]
+                    default_graph_id = _get_operation_graph_id(op)
+                    from_graph_id, from_node_id = _resolve_node_reference(
+                        from_node,
+                        created_nodes=created_nodes,
+                        default_graph_id=default_graph_id,
+                        field_name="from_node",
+                    )
+                    to_graph_id, to_node_id = _resolve_node_reference(
+                        to_node,
+                        created_nodes=created_nodes,
+                        default_graph_id=default_graph_id,
+                        field_name="to_node",
+                    )
+                    if from_graph_id != to_graph_id:
+                        raise ValueError("from_node and to_node must be in the same graph")
 
                     r = send_graph_command("connect_nodes", {
-                        "from_node_id": str(from_node),
+                        "graph_id": from_graph_id,
+                        "from_node_id": from_node_id,
                         "from_slot": op.get("from_slot", 0),
-                        "to_node_id": str(to_node),
+                        "to_node_id": to_node_id,
                         "to_slot": op.get("to_slot", 0)
                     })
                     result.update(r)
@@ -673,15 +852,27 @@ def edit_graph(operations) -> str:
                 if not from_node or not to_node:
                     result["error"] = "from_node and to_node are required"
                 else:
-                    if from_node in created_nodes:
-                        from_node = created_nodes[from_node]
-                    if to_node in created_nodes:
-                        to_node = created_nodes[to_node]
+                    default_graph_id = _get_operation_graph_id(op)
+                    from_graph_id, from_node_id = _resolve_node_reference(
+                        from_node,
+                        created_nodes=created_nodes,
+                        default_graph_id=default_graph_id,
+                        field_name="from_node",
+                    )
+                    to_graph_id, to_node_id = _resolve_node_reference(
+                        to_node,
+                        created_nodes=created_nodes,
+                        default_graph_id=default_graph_id,
+                        field_name="to_node",
+                    )
+                    if from_graph_id != to_graph_id:
+                        raise ValueError("from_node and to_node must be in the same graph")
 
                     r = send_graph_command("disconnect_nodes", {
-                        "from_node_id": str(from_node),
+                        "graph_id": from_graph_id,
+                        "from_node_id": from_node_id,
                         "from_slot": op.get("from_slot", 0),
-                        "to_node_id": str(to_node),
+                        "to_node_id": to_node_id,
                         "to_slot": op.get("to_slot", 0)
                     })
                     result.update(r)
@@ -707,7 +898,11 @@ def edit_graph(operations) -> str:
         lines.append(f"ok: {len(results)}/{len(results)}")
 
     # Show created node IDs
-    created_ids = [str(r.get("node_id")) for r in results if r.get("action") == "create" and "node_id" in r]
+    created_ids = [
+        _format_node_locator(r.get("node_id"), r.get("graph_id"))
+        for r in results
+        if r.get("action") == "create" and "node_id" in r
+    ]
     if created_ids:
         lines.append(f"created: {','.join(created_ids)}")
 
@@ -720,27 +915,39 @@ def edit_graph(operations) -> str:
             error = r.get("error", "unknown error")
             lines.append(f"  [{idx}] {action}: {error}")
 
-    # Get affected node IDs (created, moved, resized)
+    # Get affected node locators from results first.
     affected_ids = set()
     for r in results:
         if "error" not in r:
             if "node_id" in r:
-                affected_ids.add(int(r["node_id"]))
-            # For move/resize, the node_id is in the original op
+                affected_ids.add(_format_node_locator(r["node_id"], r.get("graph_id")))
 
     # Also track from operations directly
     for i, op in enumerate(operations if isinstance(operations, list) else [operations]):
         action = op.get("action", "")
-        if action in ("move", "resize", "create"):
-            node_id = op.get("node_id")
-            if node_id:
-                # Resolve refs
-                if node_id in created_nodes:
-                    node_id = created_nodes[node_id]
-                try:
-                    affected_ids.add(int(node_id))
-                except (ValueError, TypeError):
-                    pass
+        default_graph_id = _get_operation_graph_id(op)
+        try:
+            if action in ("move", "resize", "set", "delete"):
+                node_id = op.get("node_id")
+                if node_id:
+                    graph_id, local_node_id = _resolve_node_reference(
+                        node_id,
+                        created_nodes=created_nodes,
+                        default_graph_id=default_graph_id,
+                    )
+                    affected_ids.add(_format_node_locator(local_node_id, graph_id))
+            elif action in ("connect", "disconnect"):
+                for field_name in ("from_node", "to_node"):
+                    if op.get(field_name):
+                        graph_id, local_node_id = _resolve_node_reference(
+                            op.get(field_name),
+                            created_nodes=created_nodes,
+                            default_graph_id=default_graph_id,
+                            field_name=field_name,
+                        )
+                        affected_ids.add(_format_node_locator(local_node_id, graph_id))
+        except ValueError:
+            pass
 
     # Get current workflow state to find affected nodes and collisions
     workflow_data = get_workflow()
@@ -751,51 +958,43 @@ def edit_graph(operations) -> str:
             all_nodes = []
             affected_nodes = []
 
-            for node in workflow.get("nodes", []):
-                pos = node.get("pos", [0, 0])
-                size = node.get("size", [200, 100])
-
-                # Handle both array and object formats
-                if isinstance(pos, dict):
-                    x, y = pos.get("0", 0), pos.get("1", 0)
-                else:
-                    x, y = pos[0] if len(pos) > 0 else 0, pos[1] if len(pos) > 1 else 0
-                if isinstance(size, dict):
-                    w, h = size.get("0", 200), size.get("1", 100)
-                else:
-                    w, h = size[0] if len(size) > 0 else 200, size[1] if len(size) > 1 else 100
-
-                x, y, w, h = round(x), round(y), round(w), round(h)
+            for graph_id, node in _iter_workflow_nodes(workflow):
+                x, y, w, h = _extract_pos_size(node)
                 title = (node.get("title") or node.get("type") or "").replace(",", ";")
+                locator = _format_node_locator(node.get("id"), graph_id)
 
                 node_data = {
+                    "graph_id": graph_id,
                     "id": node.get("id"),
+                    "locator": locator,
                     "title": title,
                     "x": x, "y": y, "w": w, "h": h
                 }
                 all_nodes.append(node_data)
 
-                if node.get("id") in affected_ids:
+                if locator in affected_ids:
                     affected_nodes.append(node_data)
 
             # Show affected nodes (only the ones we touched)
             if affected_nodes:
-                lines.append(f"affected[{len(affected_nodes)}]{{id,title,x,y,w,h}}:")
+                lines.append(f"affected[{len(affected_nodes)}]{{id,locator,title,x,y,w,h}}:")
                 for n in affected_nodes:
-                    lines.append(f"  {n['id']},{n['title']},{n['x']},{n['y']},{n['w']},{n['h']}")
+                    lines.append(f"  {n['id']},{n['locator']},{n['title']},{n['x']},{n['y']},{n['w']},{n['h']}")
 
             # Check for collisions involving affected nodes
             collisions = []
             for affected in affected_nodes:
                 for other in all_nodes:
-                    if affected["id"] == other["id"]:
+                    if affected["graph_id"] != other["graph_id"]:
+                        continue
+                    if affected["locator"] == other["locator"]:
                         continue
                     # Check rectangle intersection
                     x_overlap = max(0, min(affected["x"] + affected["w"], other["x"] + other["w"]) - max(affected["x"], other["x"]))
                     y_overlap = max(0, min(affected["y"] + affected["h"], other["y"] + other["h"]) - max(affected["y"], other["y"]))
                     if x_overlap > 0 and y_overlap > 0:
                         # Avoid duplicate pairs
-                        pair = tuple(sorted([affected["id"], other["id"]]))
+                        pair = tuple(sorted([affected["locator"], other["locator"]]))
                         collision_str = f"  {pair[0]}<->{pair[1]} (overlap: {x_overlap}x{y_overlap})"
                         if collision_str not in collisions:
                             collisions.append(collision_str)
@@ -1175,109 +1374,101 @@ def get_node_info(node_id: str) -> str:
         return f"error: {workflow_data.get('error') or workflow_data.get('message')}"
 
     workflow = workflow_data.get("workflow", {})
-    node_id_str = str(node_id)
     try:
-        node_id_int = int(node_id)
+        requested_graph_id, node_id_str = _resolve_node_reference(node_id, field_name="node_id")
+        node_id_int = int(node_id_str)
     except ValueError:
         return f"error: invalid node_id '{node_id}'"
 
     # Handle graph serialize format
     if "nodes" in workflow:
-        for node in workflow.get("nodes", []):
-            if node.get("id") == node_id_int:
-                node_type = node.get("type")
-                title = node.get("title") or node_type
-                pos = node.get("pos", [0, 0])
-                size = node.get("size", [200, 100])
+        found = _find_workflow_node(workflow, _format_node_locator(node_id_int, requested_graph_id))
+        if found:
+            graph_id, node = found
+            node_type = node.get("type")
+            title = node.get("title") or node_type
+            x, y, w, h = _extract_pos_size(node)
 
-                # Handle array/dict formats
-                if isinstance(pos, dict):
-                    x, y = pos.get("0", 0), pos.get("1", 0)
-                else:
-                    x, y = pos[0] if len(pos) > 0 else 0, pos[1] if len(pos) > 1 else 0
-                if isinstance(size, dict):
-                    w, h = size.get("0", 200), size.get("1", 100)
-                else:
-                    w, h = size[0] if len(size) > 0 else 200, size[1] if len(size) > 1 else 100
+            lines = []
+            lines.append(f"node {node_id_int}: {title}")
+            lines.append(f"locator: {_format_node_locator(node_id_int, graph_id)}")
+            lines.append(f"graph: {graph_id or 'root'}")
+            lines.append(f"type: {node_type}")
+            lines.append(f"pos: {x},{y} size: {w}x{h}")
 
-                lines = []
-                lines.append(f"node {node_id_int}: {title}")
-                lines.append(f"type: {node_type}")
-                lines.append(f"pos: {round(x)},{round(y)} size: {round(w)}x{round(h)}")
+            # Get type info for input/output details
+            type_info = {}
+            all_nodes = get_object_info_cached()
+            if "error" not in all_nodes and node_type in all_nodes:
+                type_info = all_nodes[node_type]
 
-                # Get type info for input/output details
-                type_info = {}
-                all_nodes = get_object_info_cached()
-                if "error" not in all_nodes and node_type in all_nodes:
-                    type_info = all_nodes[node_type]
+            if type_info:
+                cat = type_info.get("category", "")
+                desc = type_info.get("description", "")
+                if cat:
+                    lines.append(f"category: {cat}")
+                if desc:
+                    lines.append(f"desc: {desc[:100]}")
 
-                if type_info:
-                    cat = type_info.get("category", "")
-                    desc = type_info.get("description", "")
-                    if cat:
-                        lines.append(f"category: {cat}")
-                    if desc:
-                        lines.append(f"desc: {desc[:100]}")
+                # Inputs from type info
+                input_info = type_info.get("input", {})
+                inputs = []
+                for group in ["required", "optional"]:
+                    if group in input_info:
+                        req_marker = "*" if group == "required" else ""
+                        for inp_name, inp_def in input_info[group].items():
+                            if isinstance(inp_def, list) and len(inp_def) > 0:
+                                inp_type = inp_def[0] if isinstance(inp_def[0], str) else type(inp_def[0]).__name__
+                                inputs.append(f"{inp_name}{req_marker}:{inp_type}")
+                if inputs:
+                    lines.append(f"inputs: {','.join(inputs)}")
 
-                    # Inputs from type info
-                    input_info = type_info.get("input", {})
-                    inputs = []
-                    for group in ["required", "optional"]:
-                        if group in input_info:
-                            req_marker = "*" if group == "required" else ""
-                            for inp_name, inp_def in input_info[group].items():
-                                if isinstance(inp_def, list) and len(inp_def) > 0:
-                                    inp_type = inp_def[0] if isinstance(inp_def[0], str) else type(inp_def[0]).__name__
-                                    inputs.append(f"{inp_name}{req_marker}:{inp_type}")
-                    if inputs:
-                        lines.append(f"inputs: {','.join(inputs)}")
+                # Outputs from type info
+                outputs = type_info.get("output", [])
+                output_names = type_info.get("output_name", outputs)
+                if outputs:
+                    out_parts = []
+                    for i, out_type in enumerate(outputs):
+                        out_name = output_names[i] if i < len(output_names) else out_type
+                        out_parts.append(f"{out_name}:{out_type}")
+                    lines.append(f"outputs: {','.join(out_parts)}")
 
-                    # Outputs from type info
-                    outputs = type_info.get("output", [])
-                    output_names = type_info.get("output_name", outputs)
-                    if outputs:
-                        out_parts = []
-                        for i, out_type in enumerate(outputs):
-                            out_name = output_names[i] if i < len(output_names) else out_type
-                            out_parts.append(f"{out_name}:{out_type}")
-                        lines.append(f"outputs: {','.join(out_parts)}")
+            # Current connections (from workflow node data)
+            node_inputs = node.get("inputs", [])
+            if node_inputs:
+                conn_parts = []
+                for inp in node_inputs:
+                    if isinstance(inp, dict) and inp.get("link"):
+                        inp_name = inp.get("name", "?")
+                        link_id = inp.get("link")
+                        conn_parts.append(f"{inp_name}=link{link_id}")
+                if conn_parts:
+                    lines.append(f"connected_inputs: {','.join(conn_parts)}")
 
-                # Current connections (from workflow node data)
-                node_inputs = node.get("inputs", [])
-                if node_inputs:
-                    conn_parts = []
-                    for inp in node_inputs:
-                        if isinstance(inp, dict) and inp.get("link"):
-                            inp_name = inp.get("name", "?")
-                            link_id = inp.get("link")
-                            conn_parts.append(f"{inp_name}=link{link_id}")
-                    if conn_parts:
-                        lines.append(f"connected_inputs: {','.join(conn_parts)}")
+            node_outputs = node.get("outputs", [])
+            if node_outputs:
+                conn_parts = []
+                for out in node_outputs:
+                    if isinstance(out, dict) and out.get("links"):
+                        out_name = out.get("name", "?")
+                        links = out.get("links", [])
+                        conn_parts.append(f"{out_name}->links{links}")
+                if conn_parts:
+                    lines.append(f"connected_outputs: {','.join(conn_parts)}")
 
-                node_outputs = node.get("outputs", [])
-                if node_outputs:
-                    conn_parts = []
-                    for out in node_outputs:
-                        if isinstance(out, dict) and out.get("links"):
-                            out_name = out.get("name", "?")
-                            links = out.get("links", [])
-                            conn_parts.append(f"{out_name}->links{links}")
-                    if conn_parts:
-                        lines.append(f"connected_outputs: {','.join(conn_parts)}")
+            # Widget values
+            widgets = node.get("widgets_values")
+            if widgets:
+                # Compact widget display - truncate long values
+                widget_strs = []
+                for i, val in enumerate(widgets):
+                    val_str = str(val)
+                    if len(val_str) > 50:
+                        val_str = val_str[:47] + "..."
+                    widget_strs.append(val_str.replace(",", ";").replace("\n", "\\n"))
+                lines.append(f"widgets[{len(widgets)}]: {','.join(widget_strs)}")
 
-                # Widget values
-                widgets = node.get("widgets_values")
-                if widgets:
-                    # Compact widget display - truncate long values
-                    widget_strs = []
-                    for i, val in enumerate(widgets):
-                        val_str = str(val)
-                        if len(val_str) > 50:
-                            val_str = val_str[:47] + "..."
-                        widget_strs.append(val_str.replace(",", ";").replace("\n", "\\n"))
-                    lines.append(f"widgets[{len(widgets)}]: {','.join(widget_strs)}")
-
-                return "\n".join(lines)
+            return "\n".join(lines)
 
         return f"error: node {node_id} not found in workflow"
 
@@ -2516,11 +2707,11 @@ def handle_request(request: dict) -> dict:
                     },
                     {
                         "name": "get_node_info",
-                        "description": "Get detailed info about a specific node in the workflow: type, properties, inputs, outputs, widget values.",
+                        "description": "Get detailed info about a specific node in the workflow: type, properties, inputs, outputs, widget values. Accepts plain root node IDs or nested locator IDs like '<subgraph_uuid>:44'.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
-                                "node_id": {"type": "string", "description": "Node ID"}
+                                "node_id": {"type": "string", "description": "Node ID. Use '<subgraph_uuid>:<local_node_id>' for nodes inside nested subgraphs."}
                             },
                             "required": ["node_id"]
                         }
@@ -2577,7 +2768,7 @@ def handle_request(request: dict) -> dict:
                     },
                     {
                         "name": "edit_graph",
-                        "description": "Edit workflow graph with batched operations. Actions: create, delete, move, resize, set, connect, disconnect. Operations execute in order; 'create' returns node_id for chaining.",
+                        "description": "Edit workflow graph with batched operations. Actions: create, delete, move, resize, set, connect, disconnect. Supports nested subgraphs via graph_id on operations or locator IDs like '<subgraph_uuid>:44'. Operations execute in order; 'create' returns node_id for chaining.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -2586,7 +2777,7 @@ def handle_request(request: dict) -> dict:
                                         {"type": "object"},
                                         {"type": "array", "items": {"type": "object"}}
                                     ],
-                                    "description": "Operation(s). Each has 'action' + params. Actions: create {node_type, pos_x, pos_y, title, ref, place_in_view}, delete {node_id or node_ids}, move {node_id, x, y} or {node_id, relative_to, direction, gap}, resize {node_id, width, height}, set {node_id, property, value} or {node_id, properties: {k:v}}, connect/disconnect {from_node, from_slot, to_node, to_slot}. Use 'ref' in create to reference node in later ops. Use 'place_in_view: true' to position new nodes at the center of the user's current viewport (nodes are offset horizontally to avoid overlap)."
+                                    "description": "Operation(s). Each has 'action' + params. Actions: create {node_type, graph_id, pos_x, pos_y, title, ref, place_in_view}, delete {node_id or node_ids}, move {node_id, graph_id, x, y} or {node_id, relative_to, direction, gap}, resize {node_id, width, height}, set {node_id, property, value} or {node_id, properties: {k:v}}, connect/disconnect {from_node, from_slot, to_node, to_slot}. Existing nested nodes can be referenced as '<subgraph_uuid>:<local_node_id>'; create and plain local IDs can target a nested graph with graph_id. Use 'ref' in create to reference node in later ops. Use 'place_in_view: true' to position new nodes at the center of the user's current viewport (nodes are offset horizontally to avoid overlap)."
                                 }
                             },
                             "required": ["operations"]

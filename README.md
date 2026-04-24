@@ -78,10 +78,10 @@ The MCP server provides these tools to supported CLI agents:
 | `get_workflow` | Get the current workflow from the browser |
 | `summarize_workflow` | Human-readable workflow summary |
 | `get_node_types` | Search available node types with filtering |
-| `get_node_info` | Get detailed info about a specific node type |
+| `get_node_info` | Get detailed info about a specific node, including nested locator IDs |
 | `get_status` | Queue status, system stats, and execution history |
 | `run` | Run workflow (optionally up to a specific node) or interrupt |
-| `edit_graph` | Batch create, delete, move, connect, and configure nodes |
+| `edit_graph` | Batch create, delete, move, connect, and configure nodes, including nested subgraphs |
 | `view_image` | View images from Preview Image / Save Image nodes |
 | `search_custom_nodes` | Search ComfyUI Manager registry for custom nodes |
 | `install_custom_node` | Install a custom node from the registry |
