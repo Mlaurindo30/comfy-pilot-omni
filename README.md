@@ -75,6 +75,7 @@ The MCP server provides these tools to supported CLI agents:
 
 | Tool | Description |
 |------|-------------|
+| `list_workflow_clients` | List live browser workflow clients/pages and their client IDs |
 | `get_workflow` | Get the current workflow from the browser |
 | `summarize_workflow` | Human-readable workflow summary |
 | `get_node_types` | Search available node types with filtering |
@@ -82,6 +83,9 @@ The MCP server provides these tools to supported CLI agents:
 | `get_status` | Queue status, system stats, and execution history |
 | `run` | Run workflow (optionally up to a specific node) or interrupt |
 | `edit_graph` | Batch create, delete, move, connect, and configure nodes, including nested subgraphs |
+| `edit_subgraph` | Batch edit a specific nested subgraph by graph ID using local node IDs |
+| `open_subgraph` | Open a subgraph in the ComfyUI canvas by graph ID or subgraph node ID |
+| `close_subgraph` | Close the current subgraph view or return all the way to the root graph |
 | `view_image` | View images from Preview Image / Save Image nodes |
 | `search_custom_nodes` | Search ComfyUI Manager registry for custom nodes |
 | `install_custom_node` | Install a custom node from the registry |
@@ -89,13 +93,15 @@ The MCP server provides these tools to supported CLI agents:
 | `update_custom_node` | Update a custom node to latest version |
 | `download_model` | Download models from Hugging Face, CivitAI, or direct URLs |
 
+When a supported CLI is launched from an embedded Comfy Pilot terminal tab, the MCP server now inherits that page's workflow client ID automatically. Workflow-sensitive MCP tools stay pinned to that specific ComfyUI page instead of drifting to whichever browser tab updated most recently. External/manual CLI sessions can call `list_workflow_clients` and then pass `client_id` to workflow-sensitive tools to target a specific page.
+
 ### Example: Creating Nodes
 
 ```
 Create a KSampler and connect it to my checkpoint loader
 ```
 
-Claude will use `edit_graph` to:
+Claude will use `edit_graph` for root-level changes and `edit_subgraph` when editing inside a nested graph:
 1. Create the KSampler node
 2. Connect the MODEL output from CheckpointLoader to KSampler's model input
 3. Position it appropriately in the graph

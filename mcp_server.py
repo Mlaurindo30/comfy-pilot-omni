@@ -24,13 +24,16 @@ Configure in your CLI agent's MCP/tool settings:
 """
 
 import json
+import contextlib
+import contextvars
+import os
 import socket
 import sys
 import urllib.request
 import urllib.error
 import urllib.parse
 import base64
-from typing import Any, Iterator
+from typing import Any, Dict, Iterator, Optional, Tuple
 
 # ComfyUI API endpoint
 def get_comfyui_url() -> str:
@@ -69,9 +72,12 @@ def get_comfyui_url() -> str:
     return "http://127.0.0.1:8000"  # Default for desktop version
 
 COMFYUI_URL = None  # Will be set on first request
+WORKFLOW_CLIENT_ENV_VAR = "COMFY_PILOT_CLIENT_ID"
+_workflow_client_override = contextvars.ContextVar("workflow_client_override", default=None)
 PLUGIN_ENDPOINTS = {
     "workflow": ["/comfy-pilot/workflow", "/claude-code/workflow"],
     "graph_command": ["/comfy-pilot/graph-command", "/claude-code/graph-command"],
+    "workflow_clients": ["/comfy-pilot/workflow-clients", "/claude-code/workflow-clients"],
 }
 
 # Cache for object_info (node types) - this rarely changes
@@ -79,6 +85,252 @@ _object_info_cache = None
 _object_info_cache_time = 0
 CACHE_TTL = 300  # 5 minutes
 ROOT_GRAPH_ALIASES = {"", "root", "__root__"}
+
+
+def normalize_workflow_client_id(client_id: Optional[str]) -> Optional[str]:
+    if client_id is None:
+        return None
+    normalized = str(client_id).strip()
+    return normalized or None
+
+
+def resolve_workflow_client_id(client_id: Optional[str] = None) -> Optional[str]:
+    explicit = normalize_workflow_client_id(client_id)
+    if explicit:
+        return explicit
+
+    override = normalize_workflow_client_id(_workflow_client_override.get())
+    if override:
+        return override
+
+    return normalize_workflow_client_id(os.environ.get(WORKFLOW_CLIENT_ENV_VAR))
+
+
+@contextlib.contextmanager
+def workflow_client_context(client_id: Optional[str]):
+    normalized = normalize_workflow_client_id(client_id)
+    if not normalized:
+        yield
+        return
+
+    token = _workflow_client_override.set(normalized)
+    try:
+        yield
+    finally:
+        _workflow_client_override.reset(token)
+
+
+def append_query_params(endpoint: str, params: Dict[str, Any]) -> str:
+    if not params:
+        return endpoint
+
+    parsed = urllib.parse.urlsplit(endpoint)
+    query = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
+    for key, value in params.items():
+        if value is not None:
+            query[key] = str(value)
+    return urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, urllib.parse.urlencode(query), parsed.fragment)
+    )
+
+
+def _normalize_graph_id(graph_id: Any) -> Optional[str]:
+    """Normalize root graph aliases to None and stringify nested graph IDs."""
+    if graph_id is None:
+        return None
+
+    graph_id_str = str(graph_id).strip()
+    if not graph_id_str or graph_id_str.lower() in ROOT_GRAPH_ALIASES:
+        return None
+
+    return graph_id_str
+
+
+def _get_operation_graph_id(op: dict) -> Optional[str]:
+    """Read graph_id from an operation using snake_case or camelCase."""
+    return _normalize_graph_id(op.get("graph_id", op.get("graphId")))
+
+
+def _format_graph_label(graph_id: Any) -> str:
+    """Return the canonical graph label used in human-facing output."""
+    return _normalize_graph_id(graph_id) or "root"
+
+
+def _format_node_locator(node_id: Any, graph_id: Any = None) -> str:
+    """Format a node reference using the canonical '<graph_id>:<node_id>' shape."""
+    normalized_graph_id = _format_graph_label(graph_id)
+    node_id_str = str(node_id)
+    return f"{normalized_graph_id}:{node_id_str}"
+
+
+def _split_node_locator(node_ref: Any) -> Optional[Tuple[Optional[str], str]]:
+    """Parse '<graph_id>:<node_id>' locators while ignoring execution IDs like '1:2:3'."""
+    if not isinstance(node_ref, str):
+        return None
+
+    parts = node_ref.rsplit(":", 1)
+    if len(parts) != 2:
+        return None
+
+    graph_id_raw, node_id_raw = parts[0].strip(), parts[1].strip()
+    if not graph_id_raw or not node_id_raw.lstrip("-").isdigit():
+        return None
+
+    normalized_graph_id = _normalize_graph_id(graph_id_raw)
+    if normalized_graph_id is None:
+        if graph_id_raw.lower() not in ROOT_GRAPH_ALIASES:
+            return None
+    elif ":" in normalized_graph_id:
+        return None
+
+    return normalized_graph_id, str(int(node_id_raw))
+
+
+def _resolve_node_reference(
+    node_ref: Any,
+    *,
+    created_nodes: Optional[Dict[str, str]] = None,
+    default_graph_id: Any = None,
+    field_name: str = "node_id",
+) -> Tuple[Optional[str], str]:
+    """Resolve refs, locators, and plain node IDs into (graph_id, local_node_id)."""
+    created_nodes = created_nodes or {}
+
+    if isinstance(node_ref, str) and node_ref in created_nodes:
+        node_ref = created_nodes[node_ref]
+
+    if isinstance(node_ref, dict):
+        default_graph_id = node_ref.get("graph_id", node_ref.get("graphId", default_graph_id))
+        node_ref = node_ref.get("node_id", node_ref.get("nodeId"))
+
+    locator = _split_node_locator(node_ref)
+    if locator:
+        graph_id, node_id = locator
+    else:
+        if node_ref is None or node_ref == "":
+            raise ValueError(f"{field_name} is required")
+        graph_id = _normalize_graph_id(default_graph_id)
+        node_id = str(node_ref).strip()
+        if not node_id or not node_id.lstrip("-").isdigit():
+            raise ValueError(f"invalid {field_name} '{node_ref}'")
+        node_id = str(int(node_id))
+
+    expected_graph_id = _normalize_graph_id(default_graph_id)
+    if expected_graph_id != graph_id and expected_graph_id is not None:
+        raise ValueError(f"{field_name} graph_id does not match operation graph_id")
+
+    return graph_id, node_id
+
+
+def _iter_workflow_nodes(workflow: dict) -> Iterator[Tuple[Optional[str], dict]]:
+    """Yield (graph_id, node) for root and nested subgraph nodes."""
+    definitions = workflow.get("definitions", {}) if isinstance(workflow, dict) else {}
+    subgraphs = {
+        str(subgraph.get("id")): subgraph
+        for subgraph in definitions.get("subgraphs", [])
+        if subgraph.get("id")
+    }
+
+    def walk(graph_data: dict, current_graph_id: Optional[str]) -> Iterator[Tuple[Optional[str], dict]]:
+        for node in graph_data.get("nodes", []):
+            yield current_graph_id, node
+            nested_graph = subgraphs.get(str(node.get("type")))
+            if nested_graph:
+                yield from walk(nested_graph, _normalize_graph_id(nested_graph.get("id")))
+
+    yield from walk(workflow, None)
+
+
+def _iter_workflow_graphs(workflow: dict) -> Iterator[Tuple[Optional[str], dict]]:
+    """Yield (graph_id, graph_data) for root and nested subgraphs."""
+    definitions = workflow.get("definitions", {}) if isinstance(workflow, dict) else {}
+    subgraphs = {
+        str(subgraph.get("id")): subgraph
+        for subgraph in definitions.get("subgraphs", [])
+        if subgraph.get("id")
+    }
+
+    def walk(graph_data: dict, current_graph_id: Optional[str]) -> Iterator[Tuple[Optional[str], dict]]:
+        yield current_graph_id, graph_data
+        for node in graph_data.get("nodes", []):
+            nested_graph = subgraphs.get(str(node.get("type")))
+            if nested_graph:
+                yield from walk(nested_graph, _normalize_graph_id(nested_graph.get("id")))
+
+    yield from walk(workflow, None)
+
+
+def _coerce_edit_operations(operations: Any) -> Tuple[Optional[list], Optional[str]]:
+    """Normalize edit operations into a list of dicts."""
+    if isinstance(operations, str):
+        try:
+            operations = json.loads(operations)
+        except json.JSONDecodeError:
+            return None, "error: Invalid operations: expected a JSON array or object"
+
+    if isinstance(operations, dict):
+        operations = [operations]
+
+    if not isinstance(operations, list):
+        return None, "error: Invalid operations: expected a JSON array or object"
+
+    return operations, None
+
+
+def _prepare_scoped_edit_operations(graph_id: Any, operations: Any) -> Tuple[Optional[list], Optional[str]]:
+    """Apply a subgraph scope to edit operations before handing them to edit_graph."""
+    normalized_graph_id = _normalize_graph_id(graph_id)
+    if not normalized_graph_id:
+        return None, "error: graph_id is required"
+
+    operations_list, error = _coerce_edit_operations(operations)
+    if error:
+        return None, error
+
+    scoped_operations = []
+    for op in operations_list:
+        if not isinstance(op, dict):
+            return None, "error: Invalid operations: each operation must be an object"
+
+        scoped_op = dict(op)
+        op_graph_id = _get_operation_graph_id(scoped_op)
+        if op_graph_id is not None and op_graph_id != normalized_graph_id:
+            return None, "error: operation graph_id does not match edit_subgraph graph_id"
+
+        scoped_op["graph_id"] = normalized_graph_id
+        scoped_operations.append(scoped_op)
+
+    return scoped_operations, None
+
+
+def _find_workflow_node(workflow: dict, node_ref: Any) -> Optional[Tuple[Optional[str], dict]]:
+    """Find a node in serialized workflow data using a plain ID or locator."""
+    graph_id, node_id = _resolve_node_reference(node_ref, field_name="node_id")
+    node_id_int = int(node_id)
+
+    for current_graph_id, node in _iter_workflow_nodes(workflow):
+        if current_graph_id == graph_id and node.get("id") == node_id_int:
+            return current_graph_id, node
+
+    return None
+
+
+def _extract_pos_size(node: dict) -> Tuple[int, int, int, int]:
+    """Return rounded (x, y, width, height) for serialized node data."""
+    pos = node.get("pos", [0, 0])
+    size = node.get("size", [200, 100])
+
+    if isinstance(pos, dict):
+        x, y = pos.get("0", 0), pos.get("1", 0)
+    else:
+        x, y = pos[0] if len(pos) > 0 else 0, pos[1] if len(pos) > 1 else 0
+
+    if isinstance(size, dict):
+        w, h = size.get("0", 200), size.get("1", 100)
+    else:
+        w, h = size[0] if len(size) > 0 else 200, size[1] if len(size) > 1 else 100
+
+    return round(x), round(y), round(w), round(h)
 
 
 def get_object_info_cached() -> dict:
@@ -139,12 +391,27 @@ def make_request(endpoint: str, method: str = "GET", data: dict = None, timeout:
         return {"error": f"Unexpected error: {type(e).__name__}: {e}"}
 
 
-def make_plugin_request(endpoint_name: str, method: str = "GET", data: dict = None, timeout: int = None) -> dict:
+def make_plugin_request(
+    endpoint_name: str,
+    method: str = "GET",
+    data: dict = None,
+    timeout: int = None,
+    client_id: Optional[str] = None,
+) -> dict:
     """Try provider-neutral plugin endpoints first, then legacy compatibility routes."""
     last_result = {"error": f"Unknown plugin endpoint: {endpoint_name}"}
+    resolved_client_id = resolve_workflow_client_id(client_id)
 
     for endpoint in PLUGIN_ENDPOINTS.get(endpoint_name, []):
-        result = make_request(endpoint, method=method, data=data, timeout=timeout)
+        request_data = dict(data) if data else None
+        request_endpoint = endpoint
+        if resolved_client_id:
+            if method.upper() == "GET":
+                request_endpoint = append_query_params(endpoint, {"client_id": resolved_client_id})
+            else:
+                request_data = {**(request_data or {}), "client_id": resolved_client_id}
+
+        result = make_request(request_endpoint, method=method, data=request_data, timeout=timeout)
         if "error" not in result:
             return result
         last_result = result
@@ -154,17 +421,29 @@ def make_plugin_request(endpoint_name: str, method: str = "GET", data: dict = No
     return last_result
 
 
-def get_workflow() -> dict:
+def get_workflow(client_id: Optional[str] = None) -> dict:
     """Get the current workflow from ComfyUI."""
+    resolved_client_id = resolve_workflow_client_id(client_id)
     # First try to get the live workflow from our plugin endpoint
-    live_workflow = make_plugin_request("workflow")
+    live_workflow = make_plugin_request("workflow", client_id=resolved_client_id)
 
     if live_workflow and live_workflow.get("workflow"):
         return {
             "source": "live",
+            "client_id": live_workflow.get("client_id") or resolved_client_id,
             "workflow": live_workflow.get("workflow"),
             "workflow_api": live_workflow.get("workflow_api"),
-            "timestamp": live_workflow.get("timestamp")
+            "timestamp": live_workflow.get("timestamp"),
+        }
+
+    if resolved_client_id:
+        if "error" in live_workflow and "404" not in live_workflow.get("error", ""):
+            return live_workflow
+        return {
+            "message": (
+                f"No workflow found for client_id '{resolved_client_id}'. "
+                "Use list_workflow_clients to discover available targets."
+            )
         }
 
     # Fallback to history if live workflow not available
@@ -187,6 +466,11 @@ def get_workflow() -> dict:
         }
 
     return {"message": "No workflow found"}
+
+
+def list_workflow_clients(client_id: Optional[str] = None) -> dict:
+    """List browser workflow clients tracked by the Comfy Pilot plugin."""
+    return make_plugin_request("workflow_clients", client_id=client_id)
 
 
 def get_node_types(search = None, category: str = None, fields: list = None) -> str:
@@ -513,138 +797,6 @@ def run(action: str = "queue", node_ids = None) -> dict:
     return {"error": f"Unknown action: {action}. Use 'queue' or 'interrupt'."}
 
 
-def _normalize_graph_id(graph_id: Any) -> str | None:
-    """Normalize root graph aliases to None and stringify nested graph IDs."""
-    if graph_id is None:
-        return None
-
-    graph_id_str = str(graph_id).strip()
-    if not graph_id_str or graph_id_str.lower() in ROOT_GRAPH_ALIASES:
-        return None
-
-    return graph_id_str
-
-
-def _get_operation_graph_id(op: dict) -> str | None:
-    """Read graph_id from an operation using snake_case or camelCase."""
-    return _normalize_graph_id(op.get("graph_id", op.get("graphId")))
-
-
-def _format_node_locator(node_id: Any, graph_id: Any = None) -> str:
-    """Format a node reference using ComfyUI's graph locator shape."""
-    normalized_graph_id = _normalize_graph_id(graph_id)
-    node_id_str = str(node_id)
-    return f"{normalized_graph_id}:{node_id_str}" if normalized_graph_id else node_id_str
-
-
-def _split_node_locator(node_ref: Any) -> tuple[str | None, str] | None:
-    """Parse '<graph_id>:<node_id>' locators while ignoring execution IDs like '1:2:3'."""
-    if not isinstance(node_ref, str):
-        return None
-
-    parts = node_ref.rsplit(":", 1)
-    if len(parts) != 2:
-        return None
-
-    graph_id_raw, node_id_raw = parts[0].strip(), parts[1].strip()
-    if not graph_id_raw or not node_id_raw.lstrip("-").isdigit():
-        return None
-
-    normalized_graph_id = _normalize_graph_id(graph_id_raw)
-    if normalized_graph_id is None:
-        if graph_id_raw.lower() not in ROOT_GRAPH_ALIASES:
-            return None
-    elif ":" in normalized_graph_id:
-        return None
-
-    return normalized_graph_id, str(int(node_id_raw))
-
-
-def _resolve_node_reference(
-    node_ref: Any,
-    *,
-    created_nodes: dict[str, str] | None = None,
-    default_graph_id: Any = None,
-    field_name: str = "node_id",
-) -> tuple[str | None, str]:
-    """Resolve refs, locators, and plain node IDs into (graph_id, local_node_id)."""
-    created_nodes = created_nodes or {}
-
-    if isinstance(node_ref, str) and node_ref in created_nodes:
-        node_ref = created_nodes[node_ref]
-
-    if isinstance(node_ref, dict):
-        default_graph_id = node_ref.get("graph_id", node_ref.get("graphId", default_graph_id))
-        node_ref = node_ref.get("node_id", node_ref.get("nodeId"))
-
-    locator = _split_node_locator(node_ref)
-    if locator:
-        graph_id, node_id = locator
-    else:
-        if node_ref is None or node_ref == "":
-            raise ValueError(f"{field_name} is required")
-        graph_id = _normalize_graph_id(default_graph_id)
-        node_id = str(node_ref).strip()
-        if not node_id or not node_id.lstrip("-").isdigit():
-            raise ValueError(f"invalid {field_name} '{node_ref}'")
-        node_id = str(int(node_id))
-
-    expected_graph_id = _normalize_graph_id(default_graph_id)
-    if expected_graph_id != graph_id and expected_graph_id is not None:
-        raise ValueError(f"{field_name} graph_id does not match operation graph_id")
-
-    return graph_id, node_id
-
-
-def _iter_workflow_nodes(workflow: dict) -> Iterator[tuple[str | None, dict]]:
-    """Yield (graph_id, node) for root and nested subgraph nodes."""
-    definitions = workflow.get("definitions", {}) if isinstance(workflow, dict) else {}
-    subgraphs = {
-        str(subgraph.get("id")): subgraph
-        for subgraph in definitions.get("subgraphs", [])
-        if subgraph.get("id")
-    }
-
-    def walk(graph_data: dict, current_graph_id: str | None) -> Iterator[tuple[str | None, dict]]:
-        for node in graph_data.get("nodes", []):
-            yield current_graph_id, node
-            nested_graph = subgraphs.get(str(node.get("type")))
-            if nested_graph:
-                yield from walk(nested_graph, _normalize_graph_id(nested_graph.get("id")))
-
-    yield from walk(workflow, None)
-
-
-def _find_workflow_node(workflow: dict, node_ref: Any) -> tuple[str | None, dict] | None:
-    """Find a node in serialized workflow data using a plain ID or locator."""
-    graph_id, node_id = _resolve_node_reference(node_ref, field_name="node_id")
-    node_id_int = int(node_id)
-
-    for current_graph_id, node in _iter_workflow_nodes(workflow):
-        if current_graph_id == graph_id and node.get("id") == node_id_int:
-            return current_graph_id, node
-
-    return None
-
-
-def _extract_pos_size(node: dict) -> tuple[int, int, int, int]:
-    """Return rounded (x, y, width, height) for serialized node data."""
-    pos = node.get("pos", [0, 0])
-    size = node.get("size", [200, 100])
-
-    if isinstance(pos, dict):
-        x, y = pos.get("0", 0), pos.get("1", 0)
-    else:
-        x, y = pos[0] if len(pos) > 0 else 0, pos[1] if len(pos) > 1 else 0
-
-    if isinstance(size, dict):
-        w, h = size.get("0", 200), size.get("1", 100)
-    else:
-        w, h = size[0] if len(size) > 0 else 200, size[1] if len(size) > 1 else 100
-
-    return round(x), round(y), round(w), round(h)
-
-
 def edit_graph(operations) -> str:
     """Edit the workflow graph with one or more operations.
 
@@ -667,15 +819,9 @@ def edit_graph(operations) -> str:
 
     Returns node_id for create operations so subsequent operations can reference it.
     """
-    if isinstance(operations, str):
-        try:
-            operations = json.loads(operations)
-        except json.JSONDecodeError:
-            return "error: Invalid operations: expected a JSON array or object"
-    if isinstance(operations, dict):
-        operations = [operations]
-    if not isinstance(operations, list):
-        return "error: Invalid operations: expected a JSON array or object"
+    operations, error = _coerce_edit_operations(operations)
+    if error:
+        return error
 
     # Cache node types for validation
     all_nodes = get_object_info_cached()
@@ -1006,6 +1152,15 @@ def edit_graph(operations) -> str:
     return "\n".join(lines)
 
 
+def edit_subgraph(graph_id, operations) -> str:
+    """Edit a specific subgraph using the same batched operations as edit_graph."""
+    scoped_operations, error = _prepare_scoped_edit_operations(graph_id, operations)
+    if error:
+        return error
+
+    return edit_graph(scoped_operations)
+
+
 def center_on_node(node_id: str) -> str:
     """Center the user's view on a specific node.
 
@@ -1015,12 +1170,41 @@ def center_on_node(node_id: str) -> str:
     Returns:
         Status message in TOON format.
     """
-    result = send_graph_command("center_on_node", {"node_id": str(node_id)})
+    try:
+        graph_id, local_node_id = _resolve_node_reference(node_id, field_name="node_id")
+    except ValueError:
+        return f"error: invalid node_id '{node_id}'"
+
+    result = send_graph_command("center_on_node", {"graph_id": graph_id, "node_id": local_node_id})
 
     if "error" in result:
         return f"error: {result['error']}"
 
     return f"ok: centered on node {node_id}"
+
+
+def open_subgraph(graph_id: Optional[str] = None, node_id: Optional[str] = None) -> dict:
+    """Open a subgraph in the user's canvas."""
+    if graph_id and node_id:
+        return {"error": "Provide either graph_id or node_id, not both."}
+
+    if node_id:
+        parent_graph_id, local_node_id = _resolve_node_reference(node_id, field_name="node_id")
+        params = {"node_id": local_node_id}
+        if parent_graph_id is not None:
+            params["graph_id"] = parent_graph_id
+    else:
+        normalized_graph_id = _normalize_graph_id(graph_id)
+        if not normalized_graph_id:
+            return {"error": "graph_id or node_id is required"}
+        params = {"graph_id": normalized_graph_id}
+
+    return send_graph_command("open_subgraph", params)
+
+
+def close_subgraph(all_levels: bool = False) -> dict:
+    """Close the current subgraph view in the user's canvas."""
+    return send_graph_command("close_subgraph", {"all_levels": bool(all_levels)})
 
 
 def run_node(node_ids) -> dict:
@@ -1099,12 +1283,14 @@ def run_node(node_ids) -> dict:
     }
 
 
-def send_graph_command(action: str, params: dict) -> dict:
+def send_graph_command(action: str, params: dict, client_id: Optional[str] = None) -> dict:
     """Send a graph manipulation command to the frontend."""
-    result = make_plugin_request("graph_command", method="POST", data={
-        "action": action,
-        "params": params
-    })
+    result = make_plugin_request(
+        "graph_command",
+        method="POST",
+        data={"action": action, "params": params},
+        client_id=client_id,
+    )
     return result
 
 
@@ -1388,11 +1574,13 @@ def get_node_info(node_id: str) -> str:
             node_type = node.get("type")
             title = node.get("title") or node_type
             x, y, w, h = _extract_pos_size(node)
+            locator = _format_node_locator(node_id_int, graph_id)
+            graph_label = _format_graph_label(graph_id)
 
             lines = []
-            lines.append(f"node {node_id_int}: {title}")
-            lines.append(f"locator: {_format_node_locator(node_id_int, graph_id)}")
-            lines.append(f"graph: {graph_id or 'root'}")
+            lines.append(f"node {locator}: {title}")
+            lines.append(f"locator: {locator}")
+            lines.append(f"graph: {graph_label}")
             lines.append(f"type: {node_type}")
             lines.append(f"pos: {x},{y} size: {w}x{h}")
 
@@ -1477,8 +1665,9 @@ def get_node_info(node_id: str) -> str:
         node_data = workflow[node_id_str]
         node_type = node_data.get("class_type", "?")
         inputs = node_data.get("inputs", {})
+        locator = _format_node_locator(node_id_str, None)
 
-        lines = [f"node {node_id_str}: {node_type}"]
+        lines = [f"node {locator}: {node_type}", f"locator: {locator}", "graph: root"]
         if inputs:
             inp_parts = [f"{k}={v}" for k, v in inputs.items()]
             lines.append(f"inputs: {','.join(inp_parts)}")
@@ -1516,75 +1705,80 @@ def summarize_workflow() -> str:
 
     lines = []
     nodes = []
+    connections = []
     min_x, min_y = float('inf'), float('inf')
     max_x, max_y = float('-inf'), float('-inf')
 
-    # Graph serialize format
-    for node in workflow.get("nodes", []):
-        pos = node.get("pos", [0, 0])
-        size = node.get("size", [200, 100])
+    for graph_id, graph_data in _iter_workflow_graphs(workflow):
+        graph_label = _format_graph_label(graph_id)
+        for node in graph_data.get("nodes", []):
+            x, y, w, h = _extract_pos_size(node)
 
-        # Handle both array and object formats for pos
-        if isinstance(pos, dict):
-            x, y = pos.get("0", 0), pos.get("1", 0)
-        else:
-            x, y = pos[0] if len(pos) > 0 else 0, pos[1] if len(pos) > 1 else 0
+            min_x = min(min_x, x)
+            min_y = min(min_y, y)
+            max_x = max(max_x, x + w)
+            max_y = max(max_y, y + h)
 
-        # Handle both array and object formats for size
-        if isinstance(size, dict):
-            w, h = size.get("0", 200), size.get("1", 100)
-        else:
-            w, h = size[0] if len(size) > 0 else 200, size[1] if len(size) > 1 else 100
+            node_type = (node.get("type") or "").replace(",", ";")
+            title = (node.get("title") or "").replace(",", ";")
+            locator = _format_node_locator(node.get("id"), graph_id)
 
-        x, y, w, h = round(x), round(y), round(w), round(h)
+            nodes.append({
+                "graph": graph_label,
+                "id": node.get("id"),
+                "locator": locator,
+                "type": node_type,
+                "title": title,
+                "x": x,
+                "y": y,
+                "w": w,
+                "h": h,
+            })
 
-        min_x = min(min_x, x)
-        min_y = min(min_y, y)
-        max_x = max(max_x, x + w)
-        max_y = max(max_y, y + h)
+        for link in graph_data.get("links", []):
+            if len(link) >= 6:
+                connections.append({
+                    "graph": graph_label,
+                    "from_locator": _format_node_locator(link[1], graph_id),
+                    "from_slot": link[2],
+                    "to_locator": _format_node_locator(link[3], graph_id),
+                    "to_slot": link[4],
+                    "type": str(link[5]).replace(",", ";"),
+                })
 
-        # Escape commas in title/type
-        node_type = (node.get("type") or "").replace(",", ";")
-        title = (node.get("title") or "").replace(",", ";")
-
-        nodes.append({
-            "id": node.get("id"),
-            "type": node_type,
-            "title": title,
-            "x": x, "y": y, "w": w, "h": h
-        })
-
-    # Sort by id for consistent output
-    nodes.sort(key=lambda n: int(n["id"]) if str(n["id"]).isdigit() else 0)
+    # Sort by graph then id for consistent output
+    nodes.sort(key=lambda n: (n["graph"] != "root", n["graph"], int(n["id"]) if str(n["id"]).isdigit() else 0))
+    connections.sort(key=lambda c: (c["graph"] != "root", c["graph"], c["from_locator"], c["to_locator"], c["from_slot"], c["to_slot"]))
 
     # Canvas bounds
     if nodes:
         lines.append(f"canvas: {round(min_x)},{round(min_y)} to {round(max_x)},{round(max_y)}")
 
     # Nodes section
-    lines.append(f"nodes[{len(nodes)}]{{id,type,title,x,y,w,h}}:")
+    lines.append(f"nodes[{len(nodes)}]{{id,locator,graph,type,title,x,y,w,h}}:")
     for n in nodes:
-        lines.append(f"  {n['id']},{n['type']},{n['title']},{n['x']},{n['y']},{n['w']},{n['h']}")
+        lines.append(f"  {n['id']},{n['locator']},{n['graph']},{n['type']},{n['title']},{n['x']},{n['y']},{n['w']},{n['h']}")
 
     # Connections section
-    links = workflow.get("links", [])
-    if links:
-        lines.append(f"connections[{len(links)}]{{from:slot->to:slot,type}}:")
-        for link in links:
-            if len(link) >= 6:
-                # link format: [link_id, from_node, from_slot, to_node, to_slot, type]
-                lines.append(f"  {link[1]}:{link[2]}->{link[3]}:{link[4]},{link[5]}")
+    if connections:
+        lines.append(f"connections[{len(connections)}]{{graph,from_locator,from_slot,to_locator,to_slot,type}}:")
+        for link in connections:
+            lines.append(
+                f"  {link['graph']},{link['from_locator']},{link['from_slot']},{link['to_locator']},{link['to_slot']},{link['type']}"
+            )
 
     # Collision detection - O(n²) but fast for typical workflow sizes
     collisions = []
     for i, a in enumerate(nodes):
         for b in nodes[i+1:]:
+            if a["graph"] != b["graph"]:
+                continue
             # Check rectangle intersection
             # Two rects overlap if they overlap on both axes
             x_overlap = max(0, min(a["x"] + a["w"], b["x"] + b["w"]) - max(a["x"], b["x"]))
             y_overlap = max(0, min(a["y"] + a["h"], b["y"] + b["h"]) - max(a["y"], b["y"]))
             if x_overlap > 0 and y_overlap > 0:
-                collisions.append(f"  {a['id']}<->{b['id']} (overlap: {x_overlap}x{y_overlap})")
+                collisions.append(f"  {a['locator']}<->{b['locator']} (overlap: {x_overlap}x{y_overlap})")
 
     if collisions:
         lines.append(f"collisions[{len(collisions)}]:")
@@ -1601,8 +1795,8 @@ def get_layout_summary() -> str:
 
     Format:
         canvas: min_x,min_y to max_x,max_y
-        nodes[N]{id,title,x,y,w,h}:
-        id,title,x,y,w,h
+        nodes[N]{id,locator,graph,title,x,y,w,h}:
+        id,locator,graph,title,x,y,w,h
         ...
     """
     workflow_data = get_workflow()
@@ -1619,45 +1813,31 @@ def get_layout_summary() -> str:
     min_x, min_y = float('inf'), float('inf')
     max_x, max_y = float('-inf'), float('-inf')
 
-    for node in workflow.get("nodes", []):
-        pos = node.get("pos", [0, 0])
-        size = node.get("size", [200, 100])  # Default size if not available
+    for graph_id, graph_data in _iter_workflow_graphs(workflow):
+        graph_label = _format_graph_label(graph_id)
+        for node in graph_data.get("nodes", []):
+            x, y, w, h = _extract_pos_size(node)
 
-        # Handle both array and object formats for pos
-        if isinstance(pos, dict):
-            x, y = pos.get("0", 0), pos.get("1", 0)
-        else:
-            x, y = pos[0] if len(pos) > 0 else 0, pos[1] if len(pos) > 1 else 0
+            min_x = min(min_x, x)
+            min_y = min(min_y, y)
+            max_x = max(max_x, x + w)
+            max_y = max(max_y, y + h)
 
-        # Handle both array and object formats for size
-        if isinstance(size, dict):
-            w, h = size.get("0", 200), size.get("1", 100)
-        else:
-            w, h = size[0] if len(size) > 0 else 200, size[1] if len(size) > 1 else 100
+            title = (node.get("title") or node.get("type") or "").replace(",", ";")
 
-        # Round for cleaner output
-        x, y, w, h = round(x), round(y), round(w), round(h)
+            nodes.append({
+                "id": node.get("id"),
+                "locator": _format_node_locator(node.get("id"), graph_id),
+                "graph": graph_label,
+                "title": title,
+                "x": x,
+                "y": y,
+                "w": w,
+                "h": h
+            })
 
-        # Track canvas bounds
-        min_x = min(min_x, x)
-        min_y = min(min_y, y)
-        max_x = max(max_x, x + w)
-        max_y = max(max_y, y + h)
-
-        # Escape commas in title
-        title = (node.get("title") or node.get("type") or "").replace(",", ";")
-
-        nodes.append({
-            "id": node.get("id"),
-            "title": title,
-            "x": x,
-            "y": y,
-            "w": w,
-            "h": h
-        })
-
-    # Sort by position (top-left to bottom-right) for easier reading
-    nodes.sort(key=lambda n: (n["y"], n["x"]))
+    # Sort by graph then position for easier reading
+    nodes.sort(key=lambda n: (n["graph"] != "root", n["graph"], n["y"], n["x"]))
 
     # Build TOON-like output
     lines = []
@@ -1670,9 +1850,9 @@ def get_layout_summary() -> str:
     lines.append(f"canvas: {bounds_min_x},{bounds_min_y} to {bounds_max_x},{bounds_max_y}")
 
     # Nodes in tabular format
-    lines.append(f"nodes[{len(nodes)}]{{id,title,x,y,w,h}}:")
+    lines.append(f"nodes[{len(nodes)}]{{id,locator,graph,title,x,y,w,h}}:")
     for n in nodes:
-        lines.append(f"  {n['id']},{n['title']},{n['x']},{n['y']},{n['w']},{n['h']}")
+        lines.append(f"  {n['id']},{n['locator']},{n['graph']},{n['title']},{n['x']},{n['y']},{n['w']},{n['h']}")
 
     return "\n".join(lines)
 
@@ -2662,11 +2842,25 @@ def handle_request(request: dict) -> dict:
             "result": {
                 "tools": [
                     {
+                        "name": "list_workflow_clients",
+                        "description": "List browser workflow clients tracked by the plugin backend, including client IDs, recent activity, and connected CLI tabs. Use this when you need to target a specific ComfyUI page/workflow.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                            "required": []
+                        }
+                    },
+                    {
                         "name": "get_workflow",
                         "description": "Get the current workflow from ComfyUI. Returns full node graph with all nodes, connections, and widget values. Use summarize_workflow for a lighter overview.",
                         "inputSchema": {
                             "type": "object",
-                            "properties": {},
+                            "properties": {
+                                "client_id": {
+                                    "type": "string",
+                                    "description": "Optional workflow client/page ID to target. If omitted, uses COMFY_PILOT_CLIENT_ID from the current CLI session or the plugin's default live client."
+                                }
+                            },
                             "required": []
                         }
                     },
@@ -2675,7 +2869,12 @@ def handle_request(request: dict) -> dict:
                         "description": "Get a concise summary of the current workflow: node IDs, types, titles, positions, and connections. Lighter than get_workflow.",
                         "inputSchema": {
                             "type": "object",
-                            "properties": {},
+                            "properties": {
+                                "client_id": {
+                                    "type": "string",
+                                    "description": "Optional workflow client/page ID to summarize."
+                                }
+                            },
                             "required": []
                         }
                     },
@@ -2707,11 +2906,18 @@ def handle_request(request: dict) -> dict:
                     },
                     {
                         "name": "get_node_info",
-                        "description": "Get detailed info about a specific node in the workflow: type, properties, inputs, outputs, widget values. Accepts plain root node IDs or nested locator IDs like '<subgraph_uuid>:44'.",
+                        "description": "Get detailed info about a specific node in the workflow: type, properties, inputs, outputs, widget values. Canonical locators are 'root:<id>' for root nodes and '<graph_id>:<id>' for nested nodes. Plain root IDs are still accepted for compatibility.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
-                                "node_id": {"type": "string", "description": "Node ID. Use '<subgraph_uuid>:<local_node_id>' for nodes inside nested subgraphs."}
+                                "node_id": {
+                                    "type": "string",
+                                    "description": "Node locator. Prefer 'root:<id>' for root nodes and '<subgraph_uuid>:<local_node_id>' for nested nodes. Plain root IDs are also accepted."
+                                },
+                                "client_id": {
+                                    "type": "string",
+                                    "description": "Optional workflow client/page ID to inspect."
+                                }
                             },
                             "required": ["node_id"]
                         }
@@ -2761,6 +2967,10 @@ def handle_request(request: dict) -> dict:
                                         {"type": "array", "items": {"type": "string"}}
                                     ],
                                     "description": "Optional: validate these nodes exist before running"
+                                },
+                                "client_id": {
+                                    "type": "string",
+                                    "description": "Optional workflow client/page ID to run against."
                                 }
                             },
                             "required": []
@@ -2768,7 +2978,7 @@ def handle_request(request: dict) -> dict:
                     },
                     {
                         "name": "edit_graph",
-                        "description": "Edit workflow graph with batched operations. Actions: create, delete, move, resize, set, connect, disconnect. Supports nested subgraphs via graph_id on operations or locator IDs like '<subgraph_uuid>:44'. Operations execute in order; 'create' returns node_id for chaining.",
+                        "description": "Edit workflow graph with batched operations. Actions: create, delete, move, resize, set, connect, disconnect. Canonical node locators are 'root:<id>' for root nodes and '<graph_id>:<id>' for nested nodes. Operations execute in order; 'create' returns locator-based node IDs for chaining.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -2777,10 +2987,79 @@ def handle_request(request: dict) -> dict:
                                         {"type": "object"},
                                         {"type": "array", "items": {"type": "object"}}
                                     ],
-                                    "description": "Operation(s). Each has 'action' + params. Actions: create {node_type, graph_id, pos_x, pos_y, title, ref, place_in_view}, delete {node_id or node_ids}, move {node_id, graph_id, x, y} or {node_id, relative_to, direction, gap}, resize {node_id, width, height}, set {node_id, property, value} or {node_id, properties: {k:v}}, connect/disconnect {from_node, from_slot, to_node, to_slot}. Existing nested nodes can be referenced as '<subgraph_uuid>:<local_node_id>'; create and plain local IDs can target a nested graph with graph_id. Use 'ref' in create to reference node in later ops. Use 'place_in_view: true' to position new nodes at the center of the user's current viewport (nodes are offset horizontally to avoid overlap)."
+                                    "description": "Operation(s). Each has 'action' + params. Actions: create {node_type, pos_x, pos_y, title, ref, graph_id, place_in_view}, delete {node_id or node_ids}, move {node_id, x, y} or {node_id, relative_to, direction, gap}, resize {node_id, width, height}, set {node_id, property, value} or {node_id, properties: {k:v}}, connect/disconnect {from_node, from_slot, to_node, to_slot}. Prefer canonical locators: 'root:<id>' for root nodes and '<subgraph_uuid>:<id>' for nested nodes. Use graph_id to target a nested subgraph for create or local node IDs. Use 'ref' in create to reference node in later ops. Use 'place_in_view: true' to position new nodes at the center of the user's current viewport (nodes are offset horizontally to avoid overlap)."
+                                },
+                                "client_id": {
+                                    "type": "string",
+                                    "description": "Optional workflow client/page ID to edit."
                                 }
                             },
                             "required": ["operations"]
+                        }
+                    },
+                    {
+                        "name": "edit_subgraph",
+                        "description": "Edit a specific nested subgraph with the same batched operations as edit_graph. Provide the target graph_id once and use local node IDs or same-graph locators within that scope.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "graph_id": {
+                                    "type": "string",
+                                    "description": "Target subgraph graph ID to edit."
+                                },
+                                "operations": {
+                                    "oneOf": [
+                                        {"type": "object"},
+                                        {"type": "array", "items": {"type": "object"}}
+                                    ],
+                                    "description": "Operation(s) to run inside the target subgraph. Same action shapes as edit_graph: create, delete, move, resize, set, connect, disconnect. Local node IDs are resolved inside this graph scope, canonical same-graph locators '<graph_id>:<id>' are also accepted, and create operations inherit this graph_id automatically."
+                                },
+                                "client_id": {
+                                    "type": "string",
+                                    "description": "Optional workflow client/page ID to edit."
+                                }
+                            },
+                            "required": ["graph_id", "operations"]
+                        }
+                    },
+                    {
+                        "name": "open_subgraph",
+                        "description": "Open a subgraph in the user's canvas so nested nodes are visible in the UI. Target either a subgraph graph_id or a subgraph node_id/locator.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "graph_id": {
+                                    "type": "string",
+                                    "description": "Subgraph graph ID to open."
+                                },
+                                "node_id": {
+                                    "type": "string",
+                                    "description": "Subgraph node locator. Prefer 'root:<id>' for root-level subgraph nodes or '<parent_subgraph_uuid>:<id>' for nested subgraph nodes."
+                                },
+                                "client_id": {
+                                    "type": "string",
+                                    "description": "Optional workflow client/page ID to target."
+                                }
+                            },
+                            "required": []
+                        }
+                    },
+                    {
+                        "name": "close_subgraph",
+                        "description": "Close the current subgraph view in the user's canvas. Optionally close all open subgraph levels back to root.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "all_levels": {
+                                    "type": "boolean",
+                                    "description": "When true, closes all open subgraph levels and returns to the root graph."
+                                },
+                                "client_id": {
+                                    "type": "string",
+                                    "description": "Optional workflow client/page ID to target."
+                                }
+                            },
+                            "required": []
                         }
                     },
                     {
@@ -2796,6 +3075,10 @@ def handle_request(request: dict) -> dict:
                                 "image_index": {
                                     "type": "integer",
                                     "description": "Which image to view if node has multiple (0-based). Default: 0"
+                                },
+                                "client_id": {
+                                    "type": "string",
+                                    "description": "Optional workflow client/page ID to inspect for image nodes."
                                 }
                             },
                             "required": []
@@ -2803,13 +3086,17 @@ def handle_request(request: dict) -> dict:
                     },
                     {
                         "name": "center_on_node",
-                        "description": "Center the user's viewport on a specific node. Useful after creating nodes to show the user where they were placed.",
+                        "description": "Center the user's viewport on a specific node. Supports locator IDs for nodes inside nested subgraphs.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
                                 "node_id": {
                                     "type": "string",
-                                    "description": "ID of the node to center the view on."
+                                    "description": "Node locator. Prefer 'root:<id>' for root nodes and '<subgraph_uuid>:<local_node_id>' for nested nodes. Plain root IDs are also accepted."
+                                },
+                                "client_id": {
+                                    "type": "string",
+                                    "description": "Optional workflow client/page ID to target."
                                 }
                             },
                             "required": ["node_id"]
@@ -2925,100 +3212,114 @@ def handle_request(request: dict) -> dict:
 
         try:
             result = None
+            with workflow_client_context(tool_args.get("client_id")):
+                # New consolidated tools
+                if tool_name == "list_workflow_clients":
+                    result = list_workflow_clients()
+                elif tool_name == "get_workflow":
+                    result = get_workflow()
+                elif tool_name == "summarize_workflow":
+                    result = summarize_workflow()
+                elif tool_name == "get_node_types":
+                    result = get_node_types(
+                        search=tool_args.get("search"),
+                        category=tool_args.get("category"),
+                        fields=tool_args.get("fields")
+                    )
+                elif tool_name == "get_node_info":
+                    result = get_node_info(tool_args.get("node_id", ""))
+                elif tool_name == "get_status":
+                    result = get_status(
+                        include=tool_args.get("include"),
+                        detail=tool_args.get("detail", "summary"),
+                        history_limit=tool_args.get("history_limit", 5),
+                        history_offset=tool_args.get("history_offset", 0)
+                    )
+                elif tool_name == "run":
+                    result = run(
+                        action=tool_args.get("action", "queue"),
+                        node_ids=tool_args.get("node_ids")
+                    )
+                elif tool_name == "edit_graph":
+                    result = edit_graph(tool_args.get("operations", []))
+                elif tool_name == "edit_subgraph":
+                    result = edit_subgraph(
+                        tool_args.get("graph_id"),
+                        tool_args.get("operations", []),
+                    )
+                elif tool_name == "open_subgraph":
+                    result = open_subgraph(
+                        graph_id=tool_args.get("graph_id"),
+                        node_id=tool_args.get("node_id"),
+                    )
+                elif tool_name == "close_subgraph":
+                    result = close_subgraph(all_levels=tool_args.get("all_levels", False))
+                elif tool_name == "view_image":
+                    result = view_image(
+                        node_id=tool_args.get("node_id"),
+                        image_index=tool_args.get("image_index", 0)
+                    )
+                elif tool_name == "center_on_node":
+                    result = center_on_node(tool_args.get("node_id", ""))
 
-            # New consolidated tools
-            if tool_name == "get_workflow":
-                result = get_workflow()
-            elif tool_name == "summarize_workflow":
-                result = summarize_workflow()
-            elif tool_name == "get_node_types":
-                result = get_node_types(
-                    search=tool_args.get("search"),
-                    category=tool_args.get("category"),
-                    fields=tool_args.get("fields")
-                )
-            elif tool_name == "get_node_info":
-                result = get_node_info(tool_args.get("node_id", ""))
-            elif tool_name == "get_status":
-                result = get_status(
-                    include=tool_args.get("include"),
-                    detail=tool_args.get("detail", "summary"),
-                    history_limit=tool_args.get("history_limit", 5),
-                    history_offset=tool_args.get("history_offset", 0)
-                )
-            elif tool_name == "run":
-                result = run(
-                    action=tool_args.get("action", "queue"),
-                    node_ids=tool_args.get("node_ids")
-                )
-            elif tool_name == "edit_graph":
-                result = edit_graph(tool_args.get("operations", []))
-            elif tool_name == "view_image":
-                result = view_image(
-                    node_id=tool_args.get("node_id"),
-                    image_index=tool_args.get("image_index", 0)
-                )
-            elif tool_name == "center_on_node":
-                result = center_on_node(tool_args.get("node_id", ""))
+                # Legacy tools (keep for backwards compatibility)
+                elif tool_name == "get_queue":
+                    result = get_queue()
+                elif tool_name == "get_system_stats":
+                    result = get_system_stats()
+                elif tool_name == "get_history":
+                    result = get_history(tool_args.get("prompt_id"))
+                elif tool_name == "interrupt":
+                    result = interrupt_generation()
+                elif tool_name == "run_node":
+                    result = run_node(tool_args.get("node_ids", ""))
+                elif tool_name == "create_node":
+                    result = create_node(tool_args.get("nodes", {}))
+                elif tool_name == "delete_nodes":
+                    result = delete_nodes(tool_args.get("node_ids", ""))
+                elif tool_name == "set_node_property":
+                    result = set_node_property(tool_args.get("properties", {}))
+                elif tool_name == "connect_nodes":
+                    result = connect_nodes(tool_args.get("connections", {}))
+                elif tool_name == "disconnect_nodes":
+                    result = disconnect_nodes(tool_args.get("disconnections", {}))
+                elif tool_name == "move_nodes":
+                    result = move_nodes(tool_args.get("moves", {}))
 
-            # Legacy tools (keep for backwards compatibility)
-            elif tool_name == "get_queue":
-                result = get_queue()
-            elif tool_name == "get_system_stats":
-                result = get_system_stats()
-            elif tool_name == "get_history":
-                result = get_history(tool_args.get("prompt_id"))
-            elif tool_name == "interrupt":
-                result = interrupt_generation()
-            elif tool_name == "run_node":
-                result = run_node(tool_args.get("node_ids", ""))
-            elif tool_name == "create_node":
-                result = create_node(tool_args.get("nodes", {}))
-            elif tool_name == "delete_nodes":
-                result = delete_nodes(tool_args.get("node_ids", ""))
-            elif tool_name == "set_node_property":
-                result = set_node_property(tool_args.get("properties", {}))
-            elif tool_name == "connect_nodes":
-                result = connect_nodes(tool_args.get("connections", {}))
-            elif tool_name == "disconnect_nodes":
-                result = disconnect_nodes(tool_args.get("disconnections", {}))
-            elif tool_name == "move_nodes":
-                result = move_nodes(tool_args.get("moves", {}))
+                # Node management tools
+                elif tool_name == "search_custom_nodes":
+                    result = search_custom_nodes(
+                        query=tool_args.get("query"),
+                        status=tool_args.get("status", "all"),
+                        category=tool_args.get("category"),
+                        limit=tool_args.get("limit", 10)
+                    )
+                elif tool_name == "install_custom_node":
+                    result = install_custom_node(tool_args.get("node_id", ""))
+                elif tool_name == "uninstall_custom_node":
+                    result = uninstall_custom_node(tool_args.get("node_id", ""))
+                elif tool_name == "update_custom_node":
+                    result = update_custom_node(tool_args.get("node_id", ""))
 
-            # Node management tools
-            elif tool_name == "search_custom_nodes":
-                result = search_custom_nodes(
-                    query=tool_args.get("query"),
-                    status=tool_args.get("status", "all"),
-                    category=tool_args.get("category"),
-                    limit=tool_args.get("limit", 10)
-                )
-            elif tool_name == "install_custom_node":
-                result = install_custom_node(tool_args.get("node_id", ""))
-            elif tool_name == "uninstall_custom_node":
-                result = uninstall_custom_node(tool_args.get("node_id", ""))
-            elif tool_name == "update_custom_node":
-                result = update_custom_node(tool_args.get("node_id", ""))
+                # Model download
+                elif tool_name == "download_model":
+                    result = download_model(
+                        url=tool_args.get("url", ""),
+                        model_type=tool_args.get("model_type", ""),
+                        filename=tool_args.get("filename"),
+                        hf_token=tool_args.get("hf_token"),
+                        subfolder=tool_args.get("subfolder")
+                    )
 
-            # Model download
-            elif tool_name == "download_model":
-                result = download_model(
-                    url=tool_args.get("url", ""),
-                    model_type=tool_args.get("model_type", ""),
-                    filename=tool_args.get("filename"),
-                    hf_token=tool_args.get("hf_token"),
-                    subfolder=tool_args.get("subfolder")
-                )
-
-            else:
-                return {
-                    "jsonrpc": "2.0",
-                    "id": request_id,
-                    "error": {
-                        "code": -32601,
-                        "message": f"Unknown tool: {tool_name}"
+                else:
+                    return {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "error": {
+                            "code": -32601,
+                            "message": f"Unknown tool: {tool_name}"
+                        }
                     }
-                }
         except Exception as e:
             # Return error as tool result instead of crashing
             result = {"error": f"Tool execution failed: {type(e).__name__}: {e}"}

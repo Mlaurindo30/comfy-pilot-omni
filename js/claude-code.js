@@ -1584,6 +1584,7 @@ async function syncWorkflow() {
                 "Content-Type": "application/json",
             },
             body: JSON.stringify({
+                client_id: workspace.windowSessionId,
                 workflow,
                 workflow_api: null,
                 timestamp: Date.now(),
@@ -1679,9 +1680,125 @@ function markGraphDirty(graph) {
     app.canvas?.setDirty?.(true, true);
 }
 
+function findSubgraphPath(graph, targetGraphId, path = []) {
+    if (!graph) {
+        return null;
+    }
+    if (normalizeGraphId(graph.id) === targetGraphId) {
+        return path;
+    }
+
+    for (const node of graph._nodes || graph.nodes || []) {
+        if (!node?.subgraph) {
+            continue;
+        }
+        const result = findSubgraphPath(node.subgraph, targetGraphId, [...path, node]);
+        if (result) {
+            return result;
+        }
+    }
+
+    return null;
+}
+
+function resetCanvasToRoot() {
+    if (!app.canvas?.closeSubgraph) {
+        return;
+    }
+
+    let safety = 0;
+    while (app.canvas.graph && app.canvas.graph !== app.graph && safety < 32) {
+        const before = app.canvas.graph;
+        app.canvas.closeSubgraph();
+        safety += 1;
+        if (app.canvas.graph === before) {
+            break;
+        }
+    }
+}
+
+function openSubgraphPath(path) {
+    if (!app.canvas?.openSubgraph) {
+        return { error: "Canvas openSubgraph not available" };
+    }
+
+    resetCanvasToRoot();
+    for (const node of path) {
+        if (!node?.subgraph) {
+            return { error: `Node ${node?.id ?? "?"} is not a subgraph node` };
+        }
+        app.canvas.openSubgraph(node.subgraph);
+    }
+    app.canvas.setDirty?.(true, true);
+    return null;
+}
+
+function openSubgraphByGraphId(graphId) {
+    const normalizedGraphId = normalizeGraphId(graphId);
+    if (!normalizedGraphId) {
+        return { error: "graph_id is required" };
+    }
+
+    const path = findSubgraphPath(app.graph, normalizedGraphId);
+    if (!path) {
+        return { error: `Subgraph ${graphId} not found` };
+    }
+
+    const openError = openSubgraphPath(path);
+    if (openError) {
+        return openError;
+    }
+
+    return {
+        status: "opened",
+        graph_id: normalizedGraphId,
+        at_root: false,
+    };
+}
+
+function openSubgraphByNode(nodeId, graphId) {
+    const targetGraphResult = resolveTargetGraph(graphId);
+    if (targetGraphResult.error) {
+        return targetGraphResult;
+    }
+    const { graph: targetGraph, graphId: parentGraphId } = targetGraphResult;
+
+    const nodeResult = getNodeFromGraph(targetGraph, nodeId);
+    if (nodeResult.error) {
+        return nodeResult;
+    }
+
+    const node = nodeResult.node;
+    if (!node?.subgraph) {
+        return { error: `Node ${nodeId} is not a subgraph node` };
+    }
+
+    const parentPath = parentGraphId ? findSubgraphPath(app.graph, parentGraphId) : [];
+    if (parentGraphId && !parentPath) {
+        return { error: `Graph ${graphId} not found` };
+    }
+
+    const openError = openSubgraphPath([...(parentPath || []), node]);
+    if (openError) {
+        return openError;
+    }
+
+    return {
+        status: "opened",
+        graph_id: normalizeGraphId(node.subgraph.id),
+        parent_graph_id: parentGraphId,
+        at_root: false,
+    };
+}
+
+function getCurrentCanvasGraphId() {
+    return normalizeGraphId(app.canvas?.graph?.id);
+}
+
 async function pollGraphCommands() {
     try {
-        const response = await fetch(`${API_BASE}/graph-command`);
+        const query = new URLSearchParams({ client_id: workspace.windowSessionId });
+        const response = await fetch(`${API_BASE}/graph-command?${query.toString()}`);
         const data = await response.json();
 
         if (data.command) {
@@ -1690,6 +1807,7 @@ async function pollGraphCommands() {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
+                    client_id: workspace.windowSessionId,
                     command_id: data.command.id,
                     result,
                 }),
@@ -1728,16 +1846,69 @@ async function executeGraphCommand(command) {
             }
 
             case "center_on_node": {
-                const nodeId = parseInt(params.node_id);
-                const node = app.graph.getNodeById(nodeId);
-                if (!node) {
-                    return { error: `Node ${params.node_id} not found` };
+                const targetGraphResult = resolveTargetGraph(params.graph_id);
+                if (targetGraphResult.error) {
+                    return { error: targetGraphResult.error };
                 }
+                const { graph: targetGraph, graphId } = targetGraphResult;
+
+                const nodeResult = getNodeFromGraph(targetGraph, params.node_id);
+                if (nodeResult.error) {
+                    return { error: nodeResult.error };
+                }
+
+                if (graphId) {
+                    const openResult = openSubgraphByGraphId(graphId);
+                    if (openResult.error) {
+                        return openResult;
+                    }
+                } else {
+                    resetCanvasToRoot();
+                }
+
+                const node = nodeResult.node;
                 if (app.canvas && app.canvas.centerOnNode) {
                     app.canvas.centerOnNode(node);
-                    return { status: "centered", node_id: params.node_id };
+                    return {
+                        status: "centered",
+                        graph_id: graphId,
+                        node_id: params.node_id,
+                    };
                 }
                 return { error: "Canvas centerOnNode not available" };
+            }
+
+            case "open_subgraph": {
+                if (params.node_id !== null && params.node_id !== undefined) {
+                    return openSubgraphByNode(params.node_id, params.graph_id);
+                }
+                return openSubgraphByGraphId(params.graph_id);
+            }
+
+            case "close_subgraph": {
+                if (!app.canvas?.closeSubgraph) {
+                    return { error: "Canvas closeSubgraph not available" };
+                }
+                if (!app.canvas.graph || app.canvas.graph === app.graph) {
+                    return {
+                        status: "already_root",
+                        graph_id: null,
+                        at_root: true,
+                    };
+                }
+
+                if (params.all_levels) {
+                    resetCanvasToRoot();
+                } else {
+                    app.canvas.closeSubgraph();
+                }
+                app.canvas.setDirty?.(true, true);
+
+                return {
+                    status: "closed",
+                    graph_id: getCurrentCanvasGraphId(),
+                    at_root: app.canvas.graph === app.graph,
+                };
             }
 
             case "create_node": {
