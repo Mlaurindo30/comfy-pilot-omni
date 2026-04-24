@@ -58,9 +58,11 @@ This places nodes at the **center of the user's current viewport**, so they appe
 - Adding nodes that connect to existing workflow (use relative positioning or explicit coordinates based on existing node positions)
 - Moving or modifying existing nodes
 
-### Batch Operations with edit_graph
+### Batch Operations with edit_graph and edit_subgraph
 
-**Use `edit_graph` for all graph modifications** - it batches multiple operations in a single tool call:
+**Use `edit_graph` for root graph changes and `edit_subgraph` for nested graphs** - both batch multiple operations in a single tool call:
+
+**Locator convention**: Prefer canonical node locators everywhere. Use `root:<node_id>` for root-graph nodes and `<graph_id>:<node_id>` for nodes inside subgraphs. Plain root IDs may still work, but the canonical form avoids ambiguity in summaries, `get_node_info`, and edit operations.
 
 ```
 edit_graph(operations=[

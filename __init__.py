@@ -66,6 +66,11 @@ ROUTE_BASE = "/comfy-pilot"
 LEGACY_ROUTE_BASE = "/claude-code"
 WS_ROUTE = "/ws/comfy-pilot-terminal"
 LEGACY_WS_ROUTE = "/ws/claude-terminal"
+WORKFLOW_CLIENT_PARAM = "client_id"
+WORKFLOW_CLIENT_ENV_VAR = "COMFY_PILOT_CLIENT_ID"
+WORKFLOW_ADAPTER_ENV_VAR = "COMFY_PILOT_ADAPTER_ID"
+DEFAULT_WORKFLOW_CLIENT_ID = "default"
+WORKFLOW_CLIENT_CONNECTED_MS = 5000
 
 
 def plugin_dir() -> str:
@@ -73,6 +78,41 @@ def plugin_dir() -> str:
 
 
 settings_store = SettingsStore(os.path.join(plugin_dir(), ".comfy_pilot_settings.json"))
+
+
+def normalize_workflow_client_id(value):
+    if value is None:
+        return None
+    value = str(value).strip()
+    return value or None
+
+
+def build_terminal_env(window_session_id=None, adapter_id=None):
+    env = {}
+    normalized_client_id = normalize_workflow_client_id(window_session_id)
+    if normalized_client_id:
+        env[WORKFLOW_CLIENT_ENV_VAR] = normalized_client_id
+    if adapter_id:
+        env[WORKFLOW_ADAPTER_ENV_VAR] = str(adapter_id)
+    return env
+
+
+def _build_windows_spawn_target(command, extra_env=None):
+    if not extra_env:
+        return command or [os.environ.get("COMSPEC", "cmd.exe")]
+
+    spawn_target = command or [os.environ.get("COMSPEC", "cmd.exe")]
+    if isinstance(spawn_target, str):
+        command_line = spawn_target
+    else:
+        command_line = subprocess.list2cmdline(spawn_target)
+
+    env_prefix = " && ".join(
+        f'set "{key}={str(value).replace(chr(34), chr(34) * 2)}"'
+        for key, value in extra_env.items()
+    )
+    wrapped_command = f"{env_prefix} && {command_line}" if env_prefix else command_line
+    return [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c", wrapped_command]
 
 
 class WebSocketTerminal:
@@ -86,7 +126,7 @@ class WebSocketTerminal:
         self.last_error = ""
         self._decoder = None
 
-    def spawn(self, command=None, rows=24, cols=80):
+    def spawn(self, command=None, rows=24, cols=80, extra_env=None):
         """Spawn a new PTY with an optional command."""
         if IS_WINDOWS:
             if PTY is None:
@@ -96,7 +136,7 @@ class WebSocketTerminal:
                 print(f"{PLUGIN_LOG_PREFIX} {self.last_error}")
                 return False
 
-            spawn_target = command or [os.environ.get("COMSPEC", "cmd.exe")]
+            spawn_target = _build_windows_spawn_target(command, extra_env=extra_env)
             if isinstance(spawn_target, str):
                 appname = os.environ.get("COMSPEC", "cmd.exe")
                 cmdline = f'/d /s /c "{spawn_target}"'
@@ -125,6 +165,7 @@ class WebSocketTerminal:
             env = os.environ.copy()
             env["TERM"] = "xterm-256color"
             env["COLORTERM"] = "truecolor"
+            env.update(extra_env or {})
 
             if command:
                 os.execlpe(shell, shell, "-l", "-i", "-c", command, env)
@@ -258,6 +299,14 @@ class TerminalSessionManager:
     def count(self):
         return len(self._sessions)
 
+    def get_adapter_ids_for_window_session(self, window_session_id):
+        adapter_ids = {
+            session.get("adapter_id")
+            for session in self._sessions.values()
+            if session.get("window_session_id") == window_session_id
+        }
+        return sorted(adapter_id for adapter_id in adapter_ids if adapter_id)
+
     async def close_window_session(self, window_session_id):
         if not window_session_id:
             return
@@ -287,12 +336,150 @@ class TerminalSessionManager:
 
 terminal_session_manager = TerminalSessionManager()
 
-# Global storage for the current workflow (updated by frontend)
-current_workflow = {"workflow": None, "workflow_api": None, "timestamp": None}
+class WorkflowClientManager:
+    """Tracks live workflow state and pending graph commands per browser page."""
 
-# Pending graph commands to be executed by frontend
-pending_commands = []
-command_results = {}
+    def __init__(self, terminal_manager):
+        self._terminal_manager = terminal_manager
+        self._clients = {}
+        self._pending_commands = {}
+        self._command_results = {}
+        self._latest_client_id = None
+
+    def _now_ms(self):
+        import time
+
+        return int(time.time() * 1000)
+
+    def _ensure_client(self, client_id=None):
+        normalized = (
+            normalize_workflow_client_id(client_id) or self._latest_client_id or DEFAULT_WORKFLOW_CLIENT_ID
+        )
+        state = self._clients.setdefault(
+            normalized,
+            {
+                "client_id": normalized,
+                "workflow": None,
+                "workflow_api": None,
+                "timestamp": None,
+                "updated_at": None,
+                "last_seen": None,
+            },
+        )
+        return normalized, state
+
+    def touch(self, client_id=None):
+        normalized, state = self._ensure_client(client_id)
+        state["last_seen"] = self._now_ms()
+        return normalized
+
+    def update_workflow(self, client_id=None, workflow=None, workflow_api=None, timestamp=None):
+        normalized = self.touch(client_id)
+        self._latest_client_id = normalized
+        state = self._clients[normalized]
+        if workflow is not None:
+            state["workflow"] = workflow
+        state["workflow_api"] = workflow_api
+        if timestamp is not None:
+            state["timestamp"] = timestamp
+        state["updated_at"] = self._now_ms()
+        return dict(state)
+
+    def resolve_client_id(self, client_id=None):
+        normalized = normalize_workflow_client_id(client_id)
+        if normalized:
+            return normalized
+        return self._latest_client_id
+
+    def get_workflow(self, client_id=None):
+        resolved = self.resolve_client_id(client_id)
+        if not resolved:
+            return {
+                "client_id": None,
+                "workflow": None,
+                "workflow_api": None,
+                "timestamp": None,
+                "updated_at": None,
+                "last_seen": None,
+            }
+        state = self._clients.get(resolved)
+        if state is None:
+            return None
+        return dict(state)
+
+    def list_clients(self):
+        now_ms = self._now_ms()
+        clients = []
+        for client_id, state in self._clients.items():
+            workflow = state.get("workflow")
+            node_count = None
+            if isinstance(workflow, dict) and isinstance(workflow.get("nodes"), list):
+                node_count = len(workflow["nodes"])
+
+            terminal_adapters = self._terminal_manager.get_adapter_ids_for_window_session(client_id)
+            last_seen = state.get("last_seen")
+            clients.append(
+                {
+                    "client_id": client_id,
+                    "timestamp": state.get("timestamp"),
+                    "updated_at": state.get("updated_at"),
+                    "last_seen": last_seen,
+                    "is_connected": bool(last_seen and (now_ms - last_seen) <= WORKFLOW_CLIENT_CONNECTED_MS),
+                    "has_workflow": state.get("workflow") is not None,
+                    "workflow_node_count": node_count,
+                    "terminal_adapters": terminal_adapters,
+                    "selected": client_id == self._latest_client_id,
+                }
+            )
+
+        clients.sort(key=lambda item: item.get("last_seen") or 0, reverse=True)
+        return {"default_client_id": self._latest_client_id, "clients": clients}
+
+    def pop_pending_command(self, client_id=None):
+        normalized = self.touch(client_id)
+        queue = self._pending_commands.get(normalized, [])
+        if queue:
+            return queue.pop(0)
+        return None
+
+    def queue_command(self, client_id, action, params):
+        normalized = self.touch(client_id)
+        import uuid
+
+        cmd_id = str(uuid.uuid4())
+        cmd = {"id": cmd_id, "action": action, "params": params or {}}
+        self._pending_commands.setdefault(normalized, []).append(cmd)
+        return normalized, cmd_id
+
+    def store_result(self, client_id, command_id, result):
+        normalized = self.touch(client_id)
+        self._command_results.setdefault(normalized, {})[command_id] = result
+        return normalized
+
+    def pop_result(self, client_id, command_id):
+        results = self._command_results.get(client_id, {})
+        if command_id in results:
+            return results.pop(command_id)
+        return None
+
+    def has_result(self, client_id, command_id):
+        return command_id in self._command_results.get(client_id, {})
+
+    def get_size_breakdown(self):
+        workflow_size = len(json.dumps(self._clients)) if self._clients else 0
+        commands_size = len(json.dumps(self._pending_commands)) if self._pending_commands else 0
+        results_size = len(json.dumps(self._command_results)) if self._command_results else 0
+        return {
+            "workflow_clients_bytes": workflow_size,
+            "pending_commands_bytes": commands_size,
+            "command_results_bytes": results_size,
+            "workflow_clients": len(self._clients),
+            "terminal_sessions": self._terminal_manager.count(),
+            "total_plugin_kb": round((workflow_size + commands_size + results_size) / 1024, 2),
+        }
+
+
+workflow_client_manager = WorkflowClientManager(terminal_session_manager)
 
 # Memory logging
 _last_memory_log = 0
@@ -320,6 +507,18 @@ def get_requested_adapter(request):
     return get_adapter(get_requested_adapter_id(request))
 
 
+def get_requested_workflow_client_id(request, data=None, allow_fallback=False):
+    client_id = request.query.get(WORKFLOW_CLIENT_PARAM)
+    if client_id is None and isinstance(data, dict):
+        client_id = data.get(WORKFLOW_CLIENT_PARAM)
+    client_id = normalize_workflow_client_id(client_id)
+    if client_id:
+        return client_id
+    if allow_fallback:
+        return workflow_client_manager.resolve_client_id() or DEFAULT_WORKFLOW_CLIENT_ID
+    return None
+
+
 def get_memory_mb():
     """Get current memory usage in MB."""
     if IS_WINDOWS:
@@ -339,17 +538,7 @@ def get_memory_mb():
 
 def get_plugin_memory_breakdown():
     """Get memory breakdown of plugin data structures."""
-    workflow_size = len(json.dumps(current_workflow)) if current_workflow.get("workflow") else 0
-    commands_size = len(json.dumps(pending_commands)) if pending_commands else 0
-    results_size = len(json.dumps(command_results)) if command_results else 0
-
-    return {
-        "workflow_bytes": workflow_size,
-        "pending_commands_bytes": commands_size,
-        "command_results_bytes": results_size,
-        "terminal_sessions": terminal_session_manager.count(),
-        "total_plugin_kb": round((workflow_size + commands_size + results_size) / 1024, 2),
-    }
+    return workflow_client_manager.get_size_breakdown()
 
 
 def log_memory(context=""):
@@ -384,60 +573,60 @@ async def memory_stats_handler(request):
 
 async def workflow_handler(request):
     """Handle workflow GET/POST requests."""
-    global current_workflow
-
     if request.method == "POST":
         try:
             data = await request.json()
-            current_workflow = {
-                "workflow": data.get("workflow"),
-                "workflow_api": data.get("workflow_api"),
-                "timestamp": data.get("timestamp"),
-            }
+            client_id = get_requested_workflow_client_id(request, data=data) or DEFAULT_WORKFLOW_CLIENT_ID
+            current_workflow = workflow_client_manager.update_workflow(
+                client_id=client_id,
+                workflow=data.get("workflow"),
+                workflow_api=data.get("workflow_api"),
+                timestamp=data.get("timestamp"),
+            )
             log_memory("workflow update")
-            return web.json_response({"status": "ok"})
+            return web.json_response({"status": "ok", "client_id": current_workflow.get("client_id")})
         except Exception as exc:
             return web.json_response({"error": str(exc)}, status=400)
 
-    return web.json_response(current_workflow)
+    client_id = get_requested_workflow_client_id(request, allow_fallback=True)
+    workflow = workflow_client_manager.get_workflow(client_id)
+    if workflow is None:
+        return web.json_response({"error": f"Unknown client_id: {client_id}"}, status=404)
+    return web.json_response(workflow)
 
 
 async def graph_command_handler(request):
     """Handle graph manipulation commands from the MCP server."""
-    global pending_commands, command_results
-
     if request.method == "GET":
-        if pending_commands:
-            cmd = pending_commands.pop(0)
-            return web.json_response({"command": cmd})
+        client_id = get_requested_workflow_client_id(request, allow_fallback=True)
+        cmd = workflow_client_manager.pop_pending_command(client_id)
+        if cmd:
+            return web.json_response({"client_id": client_id, "command": cmd})
         return web.json_response({"command": None})
 
     try:
         data = await request.json()
+        client_id = get_requested_workflow_client_id(request, data=data, allow_fallback=True)
 
         if "result" in data:
             cmd_id = data.get("command_id")
-            command_results[cmd_id] = data.get("result")
-            return web.json_response({"status": "ok"})
+            workflow_client_manager.store_result(client_id, cmd_id, data.get("result"))
+            return web.json_response({"status": "ok", "client_id": client_id})
 
-        import uuid
-
-        cmd_id = str(uuid.uuid4())
-        cmd = {
-            "id": cmd_id,
-            "action": data.get("action"),
-            "params": data.get("params", {}),
-        }
-        pending_commands.append(cmd)
+        client_id, cmd_id = workflow_client_manager.queue_command(
+            client_id,
+            data.get("action"),
+            data.get("params", {}),
+        )
 
         import time
 
         start = time.time()
-        while cmd_id not in command_results and time.time() - start < 5:
+        while not workflow_client_manager.has_result(client_id, cmd_id) and time.time() - start < 5:
             await asyncio.sleep(0.1)
 
-        if cmd_id in command_results:
-            result = command_results.pop(cmd_id)
+        result = workflow_client_manager.pop_result(client_id, cmd_id)
+        if result is not None:
             return web.json_response(result)
 
         return web.json_response({"error": "Timeout waiting for frontend to execute command"}, status=504)
@@ -453,11 +642,13 @@ async def run_node_handler(request):
     try:
         data = await request.json()
         node_id = data.get("node_id")
+        client_id = get_requested_workflow_client_id(request, data=data, allow_fallback=True)
 
         if not node_id:
             return web.json_response({"error": "node_id is required"}, status=400)
 
-        if not current_workflow.get("workflow_api"):
+        current_workflow = workflow_client_manager.get_workflow(client_id)
+        if not current_workflow or not current_workflow.get("workflow_api"):
             return web.json_response(
                 {"error": "No workflow available. Make sure ComfyUI is open in browser."},
                 status=400,
@@ -475,15 +666,22 @@ async def run_node_handler(request):
 
         prompt_id = str(uuid.uuid4())
         PromptServer.instance.prompt_queue.put(
-            (0, prompt_id, prompt, {"client_id": "comfy-pilot"}, [node_id_str])
+            (0, prompt_id, prompt, {"client_id": client_id or "comfy-pilot"}, [node_id_str])
         )
 
-        return web.json_response({"status": "queued", "prompt_id": prompt_id, "node_id": node_id_str})
+        return web.json_response(
+            {"status": "queued", "prompt_id": prompt_id, "node_id": node_id_str, "client_id": client_id}
+        )
     except Exception as exc:
         import traceback
 
         traceback.print_exc()
         return web.json_response({"error": str(exc)}, status=500)
+
+
+async def workflow_clients_handler(request):
+    """List live workflow clients known to the plugin backend."""
+    return web.json_response(workflow_client_manager.list_clients())
 
 
 def build_cli_inventory():
@@ -577,6 +775,7 @@ async def websocket_handler(request):
         window_session_id=window_session_id,
     )
     terminal_started = False
+    terminal_env = build_terminal_env(window_session_id=window_session_id, adapter_id=adapter.id)
 
     print(f"{PLUGIN_LOG_PREFIX} WebSocket connected: session={session_id} adapter={adapter.id}")
     log_memory(f"ws connect {adapter.id}")
@@ -669,7 +868,12 @@ async def websocket_handler(request):
                         cols = data.get("cols", 80)
 
                         if not terminal_started:
-                            terminal_started = terminal.spawn(command, rows=rows, cols=cols)
+                            terminal_started = terminal.spawn(
+                                command,
+                                rows=rows,
+                                cols=cols,
+                                extra_env=terminal_env,
+                            )
                             if not terminal_started:
                                 await ws.send_str(
                                     json.dumps(
@@ -787,6 +991,8 @@ def setup_routes(app):
         ("POST", f"{ROUTE_BASE}/workflow", workflow_handler),
         ("GET", f"{LEGACY_ROUTE_BASE}/workflow", workflow_handler),
         ("POST", f"{LEGACY_ROUTE_BASE}/workflow", workflow_handler),
+        ("GET", f"{ROUTE_BASE}/workflow-clients", workflow_clients_handler),
+        ("GET", f"{LEGACY_ROUTE_BASE}/workflow-clients", workflow_clients_handler),
         ("POST", f"{ROUTE_BASE}/run-node", run_node_handler),
         ("POST", f"{LEGACY_ROUTE_BASE}/run-node", run_node_handler),
         ("GET", f"{ROUTE_BASE}/graph-command", graph_command_handler),
@@ -807,6 +1013,7 @@ def setup_routes(app):
 
     print(f"{PLUGIN_LOG_PREFIX} Terminal WebSocket endpoint registered at {WS_ROUTE}")
     print(f"{PLUGIN_LOG_PREFIX} Workflow API endpoint registered at {ROUTE_BASE}/workflow")
+    print(f"{PLUGIN_LOG_PREFIX} Workflow clients endpoint registered at {ROUTE_BASE}/workflow-clients")
     print(f"{PLUGIN_LOG_PREFIX} Graph command endpoint registered at {ROUTE_BASE}/graph-command")
     print(f"{PLUGIN_LOG_PREFIX} CLI inventory endpoint registered at {ROUTE_BASE}/clis")
     print(f"{PLUGIN_LOG_PREFIX} Settings endpoint registered at {ROUTE_BASE}/settings")

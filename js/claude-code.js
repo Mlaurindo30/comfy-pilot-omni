@@ -1584,6 +1584,7 @@ async function syncWorkflow() {
                 "Content-Type": "application/json",
             },
             body: JSON.stringify({
+                client_id: workspace.windowSessionId,
                 workflow,
                 workflow_api: null,
                 timestamp: Date.now(),
@@ -1603,9 +1604,201 @@ async function getWorkflowApi() {
     }
 }
 
+const ROOT_GRAPH_IDS = new Set(["", "root", "__root__"]);
+
+function normalizeGraphId(graphId) {
+    if (graphId === null || graphId === undefined) {
+        return null;
+    }
+    const value = String(graphId).trim();
+    if (!value || ROOT_GRAPH_IDS.has(value.toLowerCase())) {
+        return null;
+    }
+    return value;
+}
+
+function walkGraph(graph, callback) {
+    if (!graph) {
+        return true;
+    }
+    if (callback(graph) === false) {
+        return false;
+    }
+    for (const node of graph._nodes || graph.nodes || []) {
+        if (node?.subgraph && walkGraph(node.subgraph, callback) === false) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function getGraphById(graphId) {
+    const normalizedGraphId = normalizeGraphId(graphId);
+    if (!normalizedGraphId) {
+        return app.graph;
+    }
+
+    let match = null;
+    walkGraph(app.graph, (graph) => {
+        if (normalizeGraphId(graph?.id) === normalizedGraphId) {
+            match = graph;
+            return false;
+        }
+        return true;
+    });
+    return match;
+}
+
+function resolveTargetGraph(graphId) {
+    const normalizedGraphId = normalizeGraphId(graphId);
+    const graph = getGraphById(normalizedGraphId);
+    if (!graph) {
+        return { error: `Graph ${graphId} not found` };
+    }
+    return { graph, graphId: normalizedGraphId };
+}
+
+function getNodeFromGraph(graph, nodeId) {
+    const parsedNodeId = Number.parseInt(String(nodeId), 10);
+    if (Number.isNaN(parsedNodeId)) {
+        return { error: `Invalid node ID: ${nodeId}` };
+    }
+
+    const node = graph.getNodeById(parsedNodeId);
+    if (!node) {
+        return { error: `Node ${nodeId} not found` };
+    }
+
+    return { node, nodeId: parsedNodeId };
+}
+
+function markGraphDirty(graph) {
+    graph?.setDirtyCanvas?.(true, true);
+    if (graph && graph !== app.graph) {
+        app.graph?.setDirtyCanvas?.(true, true);
+    }
+    app.canvas?.setDirty?.(true, true);
+}
+
+function findSubgraphPath(graph, targetGraphId, path = []) {
+    if (!graph) {
+        return null;
+    }
+    if (normalizeGraphId(graph.id) === targetGraphId) {
+        return path;
+    }
+
+    for (const node of graph._nodes || graph.nodes || []) {
+        if (!node?.subgraph) {
+            continue;
+        }
+        const result = findSubgraphPath(node.subgraph, targetGraphId, [...path, node]);
+        if (result) {
+            return result;
+        }
+    }
+
+    return null;
+}
+
+function resetCanvasToRoot() {
+    if (!app.canvas?.closeSubgraph) {
+        return;
+    }
+
+    let safety = 0;
+    while (app.canvas.graph && app.canvas.graph !== app.graph && safety < 32) {
+        const before = app.canvas.graph;
+        app.canvas.closeSubgraph();
+        safety += 1;
+        if (app.canvas.graph === before) {
+            break;
+        }
+    }
+}
+
+function openSubgraphPath(path) {
+    if (!app.canvas?.openSubgraph) {
+        return { error: "Canvas openSubgraph not available" };
+    }
+
+    resetCanvasToRoot();
+    for (const node of path) {
+        if (!node?.subgraph) {
+            return { error: `Node ${node?.id ?? "?"} is not a subgraph node` };
+        }
+        app.canvas.openSubgraph(node.subgraph);
+    }
+    app.canvas.setDirty?.(true, true);
+    return null;
+}
+
+function openSubgraphByGraphId(graphId) {
+    const normalizedGraphId = normalizeGraphId(graphId);
+    if (!normalizedGraphId) {
+        return { error: "graph_id is required" };
+    }
+
+    const path = findSubgraphPath(app.graph, normalizedGraphId);
+    if (!path) {
+        return { error: `Subgraph ${graphId} not found` };
+    }
+
+    const openError = openSubgraphPath(path);
+    if (openError) {
+        return openError;
+    }
+
+    return {
+        status: "opened",
+        graph_id: normalizedGraphId,
+        at_root: false,
+    };
+}
+
+function openSubgraphByNode(nodeId, graphId) {
+    const targetGraphResult = resolveTargetGraph(graphId);
+    if (targetGraphResult.error) {
+        return targetGraphResult;
+    }
+    const { graph: targetGraph, graphId: parentGraphId } = targetGraphResult;
+
+    const nodeResult = getNodeFromGraph(targetGraph, nodeId);
+    if (nodeResult.error) {
+        return nodeResult;
+    }
+
+    const node = nodeResult.node;
+    if (!node?.subgraph) {
+        return { error: `Node ${nodeId} is not a subgraph node` };
+    }
+
+    const parentPath = parentGraphId ? findSubgraphPath(app.graph, parentGraphId) : [];
+    if (parentGraphId && !parentPath) {
+        return { error: `Graph ${graphId} not found` };
+    }
+
+    const openError = openSubgraphPath([...(parentPath || []), node]);
+    if (openError) {
+        return openError;
+    }
+
+    return {
+        status: "opened",
+        graph_id: normalizeGraphId(node.subgraph.id),
+        parent_graph_id: parentGraphId,
+        at_root: false,
+    };
+}
+
+function getCurrentCanvasGraphId() {
+    return normalizeGraphId(app.canvas?.graph?.id);
+}
+
 async function pollGraphCommands() {
     try {
-        const response = await fetch(`${API_BASE}/graph-command`);
+        const query = new URLSearchParams({ client_id: workspace.windowSessionId });
+        const response = await fetch(`${API_BASE}/graph-command?${query.toString()}`);
         const data = await response.json();
 
         if (data.command) {
@@ -1614,6 +1807,7 @@ async function pollGraphCommands() {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
+                    client_id: workspace.windowSessionId,
                     command_id: data.command.id,
                     result,
                 }),
@@ -1652,19 +1846,78 @@ async function executeGraphCommand(command) {
             }
 
             case "center_on_node": {
-                const nodeId = parseInt(params.node_id);
-                const node = app.graph.getNodeById(nodeId);
-                if (!node) {
-                    return { error: `Node ${params.node_id} not found` };
+                const targetGraphResult = resolveTargetGraph(params.graph_id);
+                if (targetGraphResult.error) {
+                    return { error: targetGraphResult.error };
                 }
+                const { graph: targetGraph, graphId } = targetGraphResult;
+
+                const nodeResult = getNodeFromGraph(targetGraph, params.node_id);
+                if (nodeResult.error) {
+                    return { error: nodeResult.error };
+                }
+
+                if (graphId) {
+                    const openResult = openSubgraphByGraphId(graphId);
+                    if (openResult.error) {
+                        return openResult;
+                    }
+                } else {
+                    resetCanvasToRoot();
+                }
+
+                const node = nodeResult.node;
                 if (app.canvas && app.canvas.centerOnNode) {
                     app.canvas.centerOnNode(node);
-                    return { status: "centered", node_id: params.node_id };
+                    return {
+                        status: "centered",
+                        graph_id: graphId,
+                        node_id: params.node_id,
+                    };
                 }
                 return { error: "Canvas centerOnNode not available" };
             }
 
+            case "open_subgraph": {
+                if (params.node_id !== null && params.node_id !== undefined) {
+                    return openSubgraphByNode(params.node_id, params.graph_id);
+                }
+                return openSubgraphByGraphId(params.graph_id);
+            }
+
+            case "close_subgraph": {
+                if (!app.canvas?.closeSubgraph) {
+                    return { error: "Canvas closeSubgraph not available" };
+                }
+                if (!app.canvas.graph || app.canvas.graph === app.graph) {
+                    return {
+                        status: "already_root",
+                        graph_id: null,
+                        at_root: true,
+                    };
+                }
+
+                if (params.all_levels) {
+                    resetCanvasToRoot();
+                } else {
+                    app.canvas.closeSubgraph();
+                }
+                app.canvas.setDirty?.(true, true);
+
+                return {
+                    status: "closed",
+                    graph_id: getCurrentCanvasGraphId(),
+                    at_root: app.canvas.graph === app.graph,
+                };
+            }
+
             case "create_node": {
+                const targetGraphResult = resolveTargetGraph(params.graph_id);
+                if (targetGraphResult.error) {
+                    return { error: targetGraphResult.error };
+                }
+                const { graph: targetGraph, graphId } = targetGraphResult;
+
                 const node = LiteGraph.createNode(params.type);
                 if (!node) {
                     return { error: `Failed to create node of type: ${params.type}` };
@@ -1675,7 +1928,7 @@ async function executeGraphCommand(command) {
                 const gap = 30;
 
                 const checkCollision = (x, y, w, h) => {
-                    for (const other of app.graph._nodes) {
+                    for (const other of targetGraph._nodes || targetGraph.nodes || []) {
                         if (other === node) continue;
                         const ox = other.pos[0];
                         const oy = other.pos[1];
@@ -1712,7 +1965,7 @@ async function executeGraphCommand(command) {
                     return [startX + nodeWidth + gap, startY];
                 };
 
-                if (params.place_in_view && app.canvas) {
+                if (params.place_in_view && app.canvas && app.canvas.graph === targetGraph) {
                     const canvas = app.canvas;
                     const offset = canvas.ds.offset;
                     const scale = canvas.ds.scale;
@@ -1733,10 +1986,11 @@ async function executeGraphCommand(command) {
                 if (params.title) {
                     node.title = params.title;
                 }
-                app.graph.add(node);
-                app.graph.setDirtyCanvas(true, true);
+                targetGraph.add(node);
+                markGraphDirty(targetGraph);
                 return {
                     status: "created",
+                    graph_id: graphId,
                     node_id: node.id,
                     type: params.type,
                     title: node.title,
@@ -1746,25 +2000,37 @@ async function executeGraphCommand(command) {
             }
 
             case "delete_node": {
-                const nodeId = parseInt(params.node_id);
-                const node = app.graph.getNodeById(nodeId);
-                if (!node) {
-                    return { error: `Node ${params.node_id} not found` };
+                const targetGraphResult = resolveTargetGraph(params.graph_id);
+                if (targetGraphResult.error) {
+                    return { error: targetGraphResult.error };
                 }
-                app.graph.remove(node);
-                app.graph.setDirtyCanvas(true, true);
+                const { graph: targetGraph, graphId } = targetGraphResult;
+
+                const nodeResult = getNodeFromGraph(targetGraph, params.node_id);
+                if (nodeResult.error) {
+                    return { error: nodeResult.error };
+                }
+                targetGraph.remove(nodeResult.node);
+                markGraphDirty(targetGraph);
                 return {
                     status: "deleted",
+                    graph_id: graphId,
                     node_id: params.node_id,
                 };
             }
 
             case "set_node_property": {
-                const nodeId = parseInt(params.node_id);
-                const node = app.graph.getNodeById(nodeId);
-                if (!node) {
-                    return { error: `Node ${params.node_id} not found` };
+                const targetGraphResult = resolveTargetGraph(params.graph_id);
+                if (targetGraphResult.error) {
+                    return { error: targetGraphResult.error };
                 }
+                const { graph: targetGraph, graphId } = targetGraphResult;
+
+                const nodeResult = getNodeFromGraph(targetGraph, params.node_id);
+                if (nodeResult.error) {
+                    return { error: nodeResult.error };
+                }
+                const node = nodeResult.node;
 
                 let found = false;
                 if (node.widgets) {
@@ -1794,9 +2060,10 @@ async function executeGraphCommand(command) {
                     return { error: `Property '${params.property_name}' not found on node ${params.node_id}` };
                 }
 
-                app.graph.setDirtyCanvas(true, true);
+                markGraphDirty(targetGraph);
                 return {
                     status: "updated",
+                    graph_id: graphId,
                     node_id: params.node_id,
                     property: params.property_name,
                     value: params.value,
@@ -1804,23 +2071,35 @@ async function executeGraphCommand(command) {
             }
 
             case "connect_nodes": {
-                const fromNodeId = parseInt(params.from_node_id);
-                const toNodeId = parseInt(params.to_node_id);
-                const fromNode = app.graph.getNodeById(fromNodeId);
-                const toNode = app.graph.getNodeById(toNodeId);
+                const fromGraphId = normalizeGraphId(params.from_graph_id ?? params.graph_id);
+                const toGraphId = normalizeGraphId(params.to_graph_id ?? params.graph_id);
+                if (fromGraphId !== toGraphId) {
+                    return { error: "Source and target nodes must be in the same graph" };
+                }
 
-                if (!fromNode) {
-                    return { error: `Source node ${params.from_node_id} not found` };
+                const targetGraphResult = resolveTargetGraph(fromGraphId);
+                if (targetGraphResult.error) {
+                    return { error: targetGraphResult.error };
                 }
-                if (!toNode) {
-                    return { error: `Target node ${params.to_node_id} not found` };
+                const { graph: targetGraph, graphId } = targetGraphResult;
+
+                const fromNodeResult = getNodeFromGraph(targetGraph, params.from_node_id);
+                if (fromNodeResult.error) {
+                    return { error: `Source ${fromNodeResult.error.toLowerCase()}` };
                 }
+                const toNodeResult = getNodeFromGraph(targetGraph, params.to_node_id);
+                if (toNodeResult.error) {
+                    return { error: `Target ${toNodeResult.error.toLowerCase()}` };
+                }
+                const fromNode = fromNodeResult.node;
+                const toNode = toNodeResult.node;
 
                 const link = fromNode.connect(params.from_slot, toNode, params.to_slot);
-                app.graph.setDirtyCanvas(true, true);
+                markGraphDirty(targetGraph);
 
                 return {
                     status: "connected",
+                    graph_id: graphId,
                     from_node: params.from_node_id,
                     from_slot: params.from_slot,
                     to_node: params.to_node_id,
@@ -1830,28 +2109,39 @@ async function executeGraphCommand(command) {
             }
 
             case "disconnect_nodes": {
-                const fromNodeId = parseInt(params.from_node_id);
-                const toNodeId = parseInt(params.to_node_id);
-                const fromNode = app.graph.getNodeById(fromNodeId);
-                const toNode = app.graph.getNodeById(toNodeId);
+                const fromGraphId = normalizeGraphId(params.from_graph_id ?? params.graph_id);
+                const toGraphId = normalizeGraphId(params.to_graph_id ?? params.graph_id);
+                if (fromGraphId !== toGraphId) {
+                    return { error: "Source and target nodes must be in the same graph" };
+                }
 
-                if (!fromNode) {
-                    return { error: `Source node ${params.from_node_id} not found` };
+                const targetGraphResult = resolveTargetGraph(fromGraphId);
+                if (targetGraphResult.error) {
+                    return { error: targetGraphResult.error };
                 }
-                if (!toNode) {
-                    return { error: `Target node ${params.to_node_id} not found` };
+                const { graph: targetGraph, graphId } = targetGraphResult;
+
+                const fromNodeResult = getNodeFromGraph(targetGraph, params.from_node_id);
+                if (fromNodeResult.error) {
+                    return { error: `Source ${fromNodeResult.error.toLowerCase()}` };
                 }
+                const toNodeResult = getNodeFromGraph(targetGraph, params.to_node_id);
+                if (toNodeResult.error) {
+                    return { error: `Target ${toNodeResult.error.toLowerCase()}` };
+                }
+                const toNode = toNodeResult.node;
 
                 if (toNode.inputs && toNode.inputs[params.to_slot]) {
                     const linkId = toNode.inputs[params.to_slot].link;
                     if (linkId !== null) {
-                        app.graph.removeLink(linkId);
+                        targetGraph.removeLink(linkId);
                     }
                 }
 
-                app.graph.setDirtyCanvas(true, true);
+                markGraphDirty(targetGraph);
                 return {
                     status: "disconnected",
+                    graph_id: graphId,
                     from_node: params.from_node_id,
                     from_slot: params.from_slot,
                     to_node: params.to_node_id,
@@ -1860,23 +2150,27 @@ async function executeGraphCommand(command) {
             }
 
             case "move_node": {
-                const nodeId = parseInt(params.node_id);
-                const node = app.graph.getNodeById(nodeId);
-
-                if (!node) {
-                    return { error: `Node ${params.node_id} not found` };
+                const targetGraphResult = resolveTargetGraph(params.graph_id);
+                if (targetGraphResult.error) {
+                    return { error: targetGraphResult.error };
                 }
+                const { graph: targetGraph, graphId } = targetGraphResult;
+
+                const nodeResult = getNodeFromGraph(targetGraph, params.node_id);
+                if (nodeResult.error) {
+                    return { error: nodeResult.error };
+                }
+                const node = nodeResult.node;
 
                 let newX;
                 let newY;
 
                 if (params.relative_to && params.direction) {
-                    const refNodeId = parseInt(params.relative_to);
-                    const refNode = app.graph.getNodeById(refNodeId);
-
-                    if (!refNode) {
-                        return { error: `Reference node ${params.relative_to} not found` };
+                    const refNodeResult = getNodeFromGraph(targetGraph, params.relative_to);
+                    if (refNodeResult.error) {
+                        return { error: `Reference ${refNodeResult.error.toLowerCase()}` };
                     }
+                    const refNode = refNodeResult.node;
 
                     const gap = params.gap || 30;
                     const refPos = refNode.pos;
@@ -1924,10 +2218,11 @@ async function executeGraphCommand(command) {
                     ];
                 }
 
-                app.graph.setDirtyCanvas(true, true);
+                markGraphDirty(targetGraph);
 
                 return {
                     status: "moved",
+                    graph_id: graphId,
                     node_id: params.node_id,
                     pos: node.pos,
                     size: node.size,
