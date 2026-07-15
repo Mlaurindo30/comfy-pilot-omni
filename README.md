@@ -1,17 +1,17 @@
-# ComfyUI Pilot Extended
+# Comfy Pilot Omni 🚀
 
-[![Stars](https://img.shields.io/github/stars/rafek1241/comfy-pilot)](https://github.com/rafek1241/comfy-pilot/stargazers)
+[![Stars](https://img.shields.io/github/stars/Mlaurindo30/comfy-pilot-omni)](https://github.com/Mlaurindo30/comfy-pilot-omni/stargazers)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-> **Fork of [Comfy Pilot](https://github.com/ConstantineB6/comfy-pilot) by [@ConstantineB6](https://github.com/ConstantineB6).** Maintained here as the upstream repository is no longer active.
+> **Evolution of [ComfyUI Pilot Extended](https://github.com/rafek1241/comfy-pilot) (forked from Comfy Pilot by @ConstantineB6) with advanced features merged from ComfyUI AI Assistant.**
 
-Talk to your ComfyUI workflows. ComfyUI Pilot Extended gives supported coding CLIs direct access to see, edit, and run your workflows - with embedded terminal tabs right inside ComfyUI.
+Talk to your ComfyUI workflows. Comfy Pilot Omni gives supported coding CLIs direct access to see, edit, and run your workflows - with embedded terminal tabs right inside ComfyUI.
 
 ![Comfy Pilot](thumbnail.jpg)
 
 ## Why?
 
-Building ComfyUI workflows means manually searching for nodes, dragging connections, and tweaking values one at a time. With ComfyUI Pilot Extended, you just describe what you want:
+Building ComfyUI workflows means manually searching for nodes, dragging connections, and tweaking values one at a time. With Comfy Pilot Omni, you just describe what you want:
 
 - *"Build me an SDXL workflow with ControlNet"* — Claude creates all the nodes, connects them, and sets the parameters
 - *"Look at the output and increase the detail"* — Claude sees your generated image and adjusts the workflow
@@ -35,7 +35,7 @@ comfy node install comfyui-pilot-extended
 
 **Git Clone:**
 ```bash
-cd ~/Documents/ComfyUI/custom_nodes && git clone https://github.com/rafek1241/comfy-pilot.git
+cd ~/Documents/ComfyUI/custom_nodes && git clone https://github.com/Mlaurindo30/comfy-pilot-omni.git
 ```
 
 Claude Code can still be auto-installed when selected as the default CLI. Other supported CLIs can be enabled when they are installed on your system.
@@ -92,6 +92,10 @@ The MCP server provides these tools to supported CLI agents:
 | `uninstall_custom_node` | Uninstall a custom node |
 | `update_custom_node` | Update a custom node to latest version |
 | `download_model` | Download models from Hugging Face, CivitAI, or direct URLs |
+| `webSearch` | Search the web for ComfyUI tutorials, workflows, and node guides |
+| `fetchWebContent` | Fetch URL contents as markdown and extract embedded workflows |
+| `readDocumentation` | Fetch inputs/outputs and manual docs for a specific node type or package |
+| `getExampleWorkflow` | Fetch community workflow templates (Flux, SDXL, Wan, etc.) |
 
 When a supported CLI is launched from an embedded Comfy Pilot terminal tab, the MCP server now inherits that page's workflow client ID automatically. Workflow-sensitive MCP tools stay pinned to that specific ComfyUI page instead of drifting to whichever browser tab updated most recently. External/manual CLI sessions can call `list_workflow_clients` and then pass `client_id` to workflow-sensitive tools to target a specific page.
 
@@ -168,19 +172,28 @@ Claude will use `download_model` to download from Hugging Face to your ComfyUI m
 - `settings_store.py` - Persistent settings for default CLI and visibility
 - `js/claude-code.js` - Frontend: multi-tab xterm.js workspace, workflow sync
 - `mcp_server.py` - Shared MCP server for CLI integrations
+- `web_search.py` - Search engine utility for DuckDuckGo/SearXNG
+- `web_content.py` - Web scraper and workflow extractor
+- `documentation_resolver.py` - Local node/skills documentation reader
+- `comfyui_examples.py` - Community template loader
+- `system_context/` - Pre-configured system rules and guidelines
+- `user_context/` - Persistent user preferences database and skills
 - `CLAUDE.md` - Instructions for Claude when working with ComfyUI
 
 ## Troubleshooting
 
 ### Supported CLIs
 
-ComfyUI Pilot Extended currently includes built-in adapters for:
+Comfy Pilot Omni currently includes built-in adapters for:
 
 - Claude Code
-- GitHub Copilot CLI
-- OpenCode CLI
+- Codex CLI
 - Gemini CLI
 - Kilo Code CLI
+- OmniRoute REPL
+- Comfy CLI
+- GitHub Copilot CLI
+- OpenCode CLI
 
 Only CLIs with a usable embedded terminal are shown as live tabs by default. You can choose whether unavailable adapters should still appear in ComfyUI settings.
 
