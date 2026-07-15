@@ -325,9 +325,9 @@ ADAPTERS: dict[str, CliAdapter] = {
     "antigravity": CliAdapter(
         id="antigravity",
         label="Antigravity CLI",
-        command_candidates=("antigravity", "antigravity-cli"),
-        fallback_command="antigravity",
-        install_hint="Install Antigravity CLI and ensure the 'antigravity' command is available.",
+        command_candidates=("agy", "antigravity", "antigravity-cli"),
+        fallback_command="agy",
+        install_hint="Install Antigravity CLI and ensure the 'agy' command is available.",
         supports_mcp=True,
         supports_mcp_autoconfig=False,
         mcp_notes="Manual MCP/tool configuration for Antigravity CLI.",
