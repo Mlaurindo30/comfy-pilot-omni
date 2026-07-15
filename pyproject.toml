@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-pilot-extended"
 description = "MCP server + multi-CLI embedded terminals that let AI coding agents see and edit your ComfyUI workflows"
-version = "1.0.27"
+version = "2.0.0"
 license = { file = "LICENSE" }
 dependencies = [
 	"pywinpty>=2.0.15; sys_platform == 'win32'",
@@ -11,12 +11,12 @@ dependencies = [
 dev = ["pytest"]
 
 [project.urls]
-Repository = "https://github.com/rafek1241/comfy-pilot"
+Repository = "https://github.com/Mlaurindo30/comfy-pilot-omni"
 
 [tool.comfy]
-PublisherId = "rafek1241"
-DisplayName = "ComfyUI Pilot Extended"
-Icon = "https://raw.githubusercontent.com/rafek1241/comfy-pilot/main/thumbnail.jpg"
+PublisherId = "Mlaurindo30"
+DisplayName = "Comfy Pilot Omni"
+Icon = "https://raw.githubusercontent.com/Mlaurindo30/comfy-pilot-omni/main/thumbnail.jpg"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
