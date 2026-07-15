@@ -25,6 +25,12 @@ def sanitize_settings(data: dict | None) -> dict:
     enabled_clis = raw.get("enabled_clis", DEFAULT_SETTINGS["enabled_clis"])
     if not isinstance(enabled_clis, list):
         enabled_clis = list(DEFAULT_SETTINGS["enabled_clis"])
+    else:
+        # Auto-enable new adapters that are present in the codebase but missing from the loaded settings list.
+        enabled_clis = list(enabled_clis)
+        for adapter_id in ADAPTER_ORDER:
+            if adapter_id not in enabled_clis:
+                enabled_clis.append(adapter_id)
     enabled_clis = [adapter_id for adapter_id in enabled_clis if adapter_id in ADAPTERS]
     if not enabled_clis:
         enabled_clis = list(DEFAULT_SETTINGS["enabled_clis"])
