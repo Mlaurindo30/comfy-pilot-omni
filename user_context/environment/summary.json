@@ -1,0 +1,17 @@
+{
+  "node_types_count": 2248,
+  "custom_packages_count": 0,
+  "total_packages_count": 46,
+  "models_count": 386,
+  "model_categories": {
+    "checkpoints": 5,
+    "loras": 209,
+    "vae": 31,
+    "controlnet": 18,
+    "upscale_models": 50,
+    "clip": 35,
+    "unet": 19,
+    "diffusion_models": 19
+  },
+  "node_categories_count": 378
+}

@@ -33,7 +33,21 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import base64
-from typing import Any, Dict, Iterator, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
+
+# Import advanced tools from ComfyUI AI Assistant
+try:
+    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+    import web_search
+    import web_content
+    import documentation_resolver
+    import comfyui_examples
+except Exception as e:
+    print(f"Error importing advanced tools: {e}", file=sys.stderr)
+    web_search = None
+    web_content = None
+    documentation_resolver = None
+    comfyui_examples = None
 
 # ComfyUI API endpoint
 def get_comfyui_url() -> str:
@@ -2802,6 +2816,52 @@ def _download_with_urllib(url: str, dest_path: str) -> dict:
         return {"error": f"Download failed: {str(e)}"}
 
 
+def call_web_search(query: str, max_results: int = 5, time_range: Optional[str] = None) -> dict:
+    import asyncio
+    if not web_search:
+        return {"error": "web_search module not loaded"}
+    try:
+        return asyncio.run(web_search.web_search(query, max_results=max_results, time_range=time_range))
+    except Exception as e:
+        return {"error": f"Web search failed: {e}"}
+
+
+def call_fetch_web_content(url: str, extract_workflow: bool = True) -> dict:
+    import asyncio
+    if not web_content:
+        return {"error": "web_content module not loaded"}
+    try:
+        return asyncio.run(web_content.fetch_web_content(url, extract_workflow=extract_workflow))
+    except Exception as e:
+        return {"error": f"Web content fetch failed: {e}"}
+
+
+def call_read_documentation(topic: str, source: str = "any") -> dict:
+    if not documentation_resolver:
+        return {"error": "documentation_resolver module not loaded"}
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        system_context_dir = os.path.join(script_dir, "system_context")
+        custom_nodes_dir = os.path.dirname(script_dir)
+        return documentation_resolver.resolve_documentation(
+            topic,
+            source=source,
+            system_context_dir=system_context_dir,
+            custom_nodes_dir=custom_nodes_dir
+        )
+    except Exception as e:
+        return {"error": f"Failed to read documentation: {e}"}
+
+
+def call_get_example_workflow(category: str, query: Optional[str] = None, max_results: int = 5) -> dict:
+    if not comfyui_examples:
+        return {"error": "comfyui_examples module not loaded"}
+    try:
+        return comfyui_examples.get_examples(category, query=query, max_results=max_results)
+    except Exception as e:
+        return {"error": f"Failed to get example workflow: {e}"}
+
+
 # MCP Protocol Implementation
 def send_response(response: dict):
     """Send a JSON-RPC response."""
@@ -3201,6 +3261,89 @@ def handle_request(request: dict) -> dict:
                             },
                             "required": ["url", "model_type"]
                         }
+                    },
+                    {
+                        "name": "webSearch",
+                        "description": "Searches the web for ComfyUI-related information, tutorials, workflows, documentation, and custom node guides. Use this when you need to research how to build a specific workflow, find recommended parameters, or look up node information.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "query": {
+                                    "type": "string",
+                                    "description": "Search query (e.g. 'ComfyUI Flux Lora workflow', 'how to use Impact Pack detailer')"
+                                },
+                                "max_results": {
+                                    "type": "integer",
+                                    "description": "Optional: maximum number of results to return (default: 5, max: 20)"
+                                },
+                                "time_range": {
+                                    "type": "string",
+                                    "enum": ["day", "week", "month", "year"],
+                                    "description": "Optional: time filter for results"
+                                }
+                            },
+                            "required": ["query"]
+                        }
+                    },
+                    {
+                        "name": "fetchWebContent",
+                        "description": "Fetches and extracts content from a URL, returning text (markdown) and detecting any embedded ComfyUI API workflows. Use this to read page content or retrieve workflows from a specific page.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "url": {
+                                    "type": "string",
+                                    "description": "URL to fetch content from"
+                                },
+                                "extract_workflow": {
+                                    "type": "boolean",
+                                    "description": "Optional: whether to scan content for embedded ComfyUI API workflows (default: true)"
+                                }
+                            },
+                            "required": ["url"]
+                        }
+                    },
+                    {
+                        "name": "readDocumentation",
+                        "description": "Fetches documentation for a node type, custom node package, or topic. Returns inputs/outputs, categories, README excerpts, and manual instructions.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "topic": {
+                                    "type": "string",
+                                    "description": "Topic to resolve documentation for (e.g., 'KSampler', 'ControlNet', 'comfyui_impact_pack')"
+                                },
+                                "source": {
+                                    "type": "string",
+                                    "enum": ["installed", "builtin", "any"],
+                                    "description": "Optional: where to search: 'installed' (custom nodes), 'builtin' (system context), or 'any' (default: 'any')"
+                                }
+                            },
+                            "required": ["topic"]
+                        }
+                    },
+                    {
+                        "name": "getExampleWorkflow",
+                        "description": "Fetches example workflows from ComfyUI examples library. Use this to find clean, functional workflow skeletons for known model families.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "category": {
+                                    "type": "string",
+                                    "enum": ["flux", "flux2", "lumina2", "qwen_image", "sdxl", "wan", "wan22", "z_image"],
+                                    "description": "Workflow category matching model families"
+                                },
+                                "query": {
+                                    "type": "string",
+                                    "description": "Optional: substring filter for matching specific filenames"
+                                },
+                                "max_results": {
+                                    "type": "integer",
+                                    "description": "Optional: maximum results (default: 5)"
+                                }
+                            },
+                            "required": ["category"]
+                        }
                     }
                 ]
             }
@@ -3261,6 +3404,30 @@ def handle_request(request: dict) -> dict:
                     )
                 elif tool_name == "center_on_node":
                     result = center_on_node(tool_args.get("node_id", ""))
+
+                # Advanced research and search tools
+                elif tool_name == "webSearch":
+                    result = call_web_search(
+                        query=tool_args.get("query"),
+                        max_results=tool_args.get("max_results", 5),
+                        time_range=tool_args.get("time_range")
+                    )
+                elif tool_name == "fetchWebContent":
+                    result = call_fetch_web_content(
+                        url=tool_args.get("url"),
+                        extract_workflow=tool_args.get("extract_workflow", True)
+                    )
+                elif tool_name == "readDocumentation":
+                    result = call_read_documentation(
+                        topic=tool_args.get("topic"),
+                        source=tool_args.get("source", "any")
+                    )
+                elif tool_name == "getExampleWorkflow":
+                    result = call_get_example_workflow(
+                        category=tool_args.get("category"),
+                        query=tool_args.get("query"),
+                        max_results=tool_args.get("max_results", 5)
+                    )
 
                 # Legacy tools (keep for backwards compatibility)
                 elif tool_name == "get_queue":

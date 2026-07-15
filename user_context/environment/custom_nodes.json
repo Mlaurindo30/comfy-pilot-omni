@@ -1,0 +1,324 @@
+[
+  {
+    "name": "ComfyUI-Attention-Optimizer",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "Automatically benchmark and optimize attention in diffusion models. 1.5-2x speedup on RTX 4090, up to 4x on video models.",
+    "version": "1.0.0"
+  },
+  {
+    "name": "ComfyUI-Color-Matcher",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "ComfyUI node for color matching between images using color-matcher library",
+    "version": "1.0.0"
+  },
+  {
+    "name": "ComfyUI-ComfyUI-Flash-Attention_v100",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "A ComfyUI custom node enabling **Flash Attention 1** on legacy NVIDIA GPUs (Tesla V100, T4) that lack Compute Capability 8.0+ required by FlashAttention-2.",
+    "version": "1.0.0"
+  },
+  {
+    "name": "ComfyUI-DistorchMemoryManager",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "An independent memory management custom node for ComfyUI. Provides Distorch memory management functionality for efficient GPU/CPU memory handling. Supports purging of SeedVR2, Qwen3-VL, Nunchaku models (FLUX/Z-Image/Qwen-Image), and HSWQ INT8 (comfy_quant) models. Includes Model Patch Memory Cleaner for ModelPatchLoader workflows. Auto-detects non-PyTorch VRAM usage via NVML to prevent OOM errors in multi-process environments.",
+    "version": "2.4.1"
+  },
+  {
+    "name": "ComfyUI-EasyColorCorrector",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "ComfyUI custom node for flexible and efficient image color correction and post-processing.",
+    "version": "1.2.5"
+  },
+  {
+    "name": "ComfyUI-Free-GPU",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "",
+    "version": ""
+  },
+  {
+    "name": "ComfyUI-FreeMemory",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "ComfyUI-FreeMemory is a custom node extension for ComfyUI that provides advanced memory management capabilities within your image generation workflows. It aims to help prevent out-of-memory errors and optimize resource usage during complex operations.",
+    "version": "1.0.0"
+  },
+  {
+    "name": "ComfyUI-GGUF",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "GGUF Quantization support for native ComfyUI models.",
+    "version": "1.1.10"
+  },
+  {
+    "name": "ComfyUI-Krea2T-Enhancer",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "Krea2 Turbo Enhancement Nodes",
+    "version": "1.1.0"
+  },
+  {
+    "name": "ComfyUI-ParallelAnything",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "This suite of nodes unlocks high-performance parallel processing in ComfyUI by utilizing **Model Replication**. Unlike standard offloading which moves a single model instance between devices, these nodes create independent replicas of the model on each selected GPU/CPU, allowing for true simultaneous batch processing.",
+    "version": "1.0.11"
+  },
+  {
+    "name": "ComfyUI-PuLID-Flux-Enhanced",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "",
+    "version": ""
+  },
+  {
+    "name": "ComfyUI_ComfyAssistant",
+    "has_agents": true,
+    "has_readme": true,
+    "description": "AI Assistant for ComfyUI with agentic capabilities to interact with workflows.",
+    "version": "1.0.0"
+  },
+  {
+    "name": "Comfyui-ColorMatchNodes",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "Color match nodes for ComfyUI that color-match target images against reference images with manual or auto-ramped blending, ideal for smooth color transitions between video clips.",
+    "version": "1.1.0"
+  },
+  {
+    "name": "amdgpumonitor",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "A simple, lightweight AMD GPU monitoring tool for ComfyUI that displays real-time information about your AMD GPU directly in the UI.",
+    "version": "1.0.0"
+  },
+  {
+    "name": "cg-use-everywhere",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "A set of nodes that allow data to be 'broadcast' to some or all unconnected inputs. Greatly reduces link spaghetti.",
+    "version": "7.8"
+  },
+  {
+    "name": "comfy-mtb",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "Animation oriented nodes pack for ComfyUI.",
+    "version": "0.5.4"
+  },
+  {
+    "name": "comfyui-advanced-monitor",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "Sleek, modern resource monitors (CPU / RAM / GPU / VRAM / Temp / Disk) for the ComfyUI toolbar, with live sparklines.",
+    "version": "1.1.0"
+  },
+  {
+    "name": "comfyui-custom-scripts",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "Enhancements & experiments for ComfyUI, mostly focusing on UI features",
+    "version": "1.2.5"
+  },
+  {
+    "name": "comfyui-easy-use",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "To enhance the usability of ComfyUI, optimizations and integrations have been implemented for several commonly used nodes.",
+    "version": "1.3.6"
+  },
+  {
+    "name": "comfyui-ideogram-palette-and-prompt-tools",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "Extract color palettes from reference images and assemble/validate/embed Ideogram 4's structured prompt JSON.",
+    "version": "1.1.1"
+  },
+  {
+    "name": "comfyui-imageautotone",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "A node for ComfyUI that takes an input image and clips the color channels independently to increase contrast and alter color cast. This is a reinterpretation of PhotoShop's 'Auto Tone' algorithm.",
+    "version": "0.0.2"
+  },
+  {
+    "name": "comfyui-impact-pack",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "This node pack offers various detector nodes and detailer nodes that allow you to configure a workflow that automatically enhances facial details. And provide iterative upscaler.",
+    "version": "8.28.3"
+  },
+  {
+    "name": "comfyui-impact-subpack",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "This node pack provides nodes that complement the Impact Pack, such as the UltralyticsDetectorProvider.",
+    "version": "1.3.5"
+  },
+  {
+    "name": "comfyui-inspire-pack",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "This extension provides various nodes to support Lora Block Weight, Regional Nodes, Backend Cache, Prompt Utils, List Utils, Noise(Seed) Utils, ... and the Impact Pack.",
+    "version": "1.23"
+  },
+  {
+    "name": "comfyui-kjnodes",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "Various quality of life -nodes for ComfyUI, mostly just visual stuff to improve usability.",
+    "version": "1.4.7"
+  },
+  {
+    "name": "comfyui-krea-reference",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "Guide Krea 2 with reference images and training-free concept sliders: stack up to 12 guide cards using plain-language recipes - keep the subject, borrow style/palette/lighting/material, copy pose or shapes, avoid text/logos - write your own recipes, and dial any attribute you can name from -6 to +6 with slider cards. No LoRA training or extra weights.",
+    "version": "0.4.0"
+  },
+  {
+    "name": "comfyui-lcs",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "Latent Color Space (LCS) manipulation for ComfyUI \u2014 brightness, tone, sharpness, and diversity tools.",
+    "version": "1.0.0"
+  },
+  {
+    "name": "comfyui-loadimage-advanced",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "This is a node that simply integrates LoadImage, Vae Encode, Upscale, Resolution factor correction, and Color Adjustment.",
+    "version": "1.2.1"
+  },
+  {
+    "name": "comfyui-lora-manager",
+    "has_agents": true,
+    "has_readme": true,
+    "description": "Revolutionize your workflow with the ultimate LoRA companion for ComfyUI!",
+    "version": "1.1.7"
+  },
+  {
+    "name": "comfyui-multigpu",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "Provides a suite of custom nodes to manage multiple GPUs for ComfyUI, including advanced model offloading for both GGUF and Safetensor formats with DisTorch, and bespoke MultiGPU support for WanVideoWrapper and other custom nodes.",
+    "version": "2.5.11"
+  },
+  {
+    "name": "comfyui-mxtoolkit",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "A set of useful nodes for convenient use of ComfyUI, including: Seed randomization before the generation process starts, with saving of the last used values and the ability to automatically interrupt the current generation; A function to pause the generation process; Slider nodes for convenient control of input parameters; An alternative version of the standard Reroute node.",
+    "version": "0.9.92"
+  },
+  {
+    "name": "comfyui-pilot-extended",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "MCP server + multi-CLI embedded terminals that let AI coding agents see and edit your ComfyUI workflows",
+    "version": "1.0.27"
+  },
+  {
+    "name": "comfyui-workflow-encrypt",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "Encrypt your comfyui workflow, and share it with key",
+    "version": "1.0.0"
+  },
+  {
+    "name": "comfyui-workflow-models-downloader",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "Scan workflows for required models and download them automatically from HuggingFace, CivitAI, and other sources. Features include filter dropdowns, Tavily AI-powered advanced search, metadata caching, and automatic URL restoration.",
+    "version": "1.8.1"
+  },
+  {
+    "name": "comfyui_essentials",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "Essential nodes that are weirdly missing from ComfyUI core. With few exceptions they are new features and not commodities.",
+    "version": "1.1.0"
+  },
+  {
+    "name": "comfyui_ipadapter_plus",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "ComfyUI reference implementation for the IPAdapter models. The IPAdapter are very powerful models for image conditioning. The style and composition of a reference can be easily transferred to the generation. Think of it as a 1-image lora.",
+    "version": "2.0.0"
+  },
+  {
+    "name": "comfyui_layerstyle",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "A set of nodes for ComfyUI it generate image like Adobe Photoshop's Layer Style. the Drop Shadow is first completed node, and follow-up work is in progress.",
+    "version": "1.0.90"
+  },
+  {
+    "name": "comfyui_pulid_flux_ll",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "The implementation for PuLID-Flux, support use with TeaCache and WaveSpeed, no model pollution.",
+    "version": "1.1.4"
+  },
+  {
+    "name": "comfyui_tinyterranodes",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "Customizable xyPlot, various pipe nodes, fullscreen image viewer based on node history, dynamic widgets, interface customization, and more.",
+    "version": "2.0.10"
+  },
+  {
+    "name": "controlaltai-nodes",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "Quality of Life Nodes from ControlAltAI. Flux Resolution Calculator, Flux Sampler, Flux Union ControlNet Apply, Noise Plus Blend, Boolean Logic, and Flux Region Nodes.",
+    "version": "1.1.4"
+  },
+  {
+    "name": "editutils",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "A collection of utility nodes for advanced image editing in ComfyUI, supporting multiple AI models including Qwen and Flux2Klein.",
+    "version": "1.1.1"
+  },
+  {
+    "name": "efficiency-nodes-comfyui",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "Efficiency Nodes for ComfyUI Version 2.0 A collection of ComfyUI custom nodes to help streamline workflows and reduce total node count.",
+    "version": "1.0.9"
+  },
+  {
+    "name": "jovi_colorizer",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "Colorize ComfyUI nodes with defaults per node, node category or via regex filtering.",
+    "version": "1.0.3"
+  },
+  {
+    "name": "multigpu-orchestrator",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "Multi GPU parallel queuing for ComfyUI. Keep all GPUs busy from one ComfyUI session by automatically dispatching workflows across every CUDA device.",
+    "version": "1.2"
+  },
+  {
+    "name": "realisim-enhancor",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "A ComfyUI image enhancement node with JPEG degradation, noise, blur, sharpening, contrast, and color controls.",
+    "version": "1.0.1"
+  },
+  {
+    "name": "rgthree-comfy",
+    "has_agents": false,
+    "has_readme": true,
+    "description": "Making ComfyUI more comfortable.",
+    "version": "1.0.2606200020"
+  }
+]
